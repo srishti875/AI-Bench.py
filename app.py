@@ -1,4 +1,4 @@
-"""AI-bench entry point: navigation, session state and page orchestration."""
+"""AI-bench: an AI-first interview coach for students."""
 
 import html
 import re
@@ -6,59 +6,55 @@ import re
 import streamlit as st
 
 from backend import (
+    ai_available,
     calculate_session_score,
-    coach_message,
-    create_interview,
     evaluate_answer,
-    get_ai_client,
-    get_question_pool,
-    get_subjects,
-    load_question_bank,
+    freeform_coach,
+    generate_interview,
+    generate_next_question,
+    score_from_feedback,
+    suggest_questions,
 )
 from database import (
     authenticate_user,
+    create_note,
     create_user,
+    delete_note,
     get_user,
+    load_notes,
     load_results,
     save_result,
     update_user,
 )
-from frontend import (
-    apply_styles,
-    feedback_card,
-    glass_card,
-    metric_card,
-    page_header,
-    section_title,
-)
+from frontend import apply_styles, feedback_card, glass_card, metric_card, page_header, section_title, stat_strip
 
-st.set_page_config(
-    page_title="AI-bench",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="AI-bench", page_icon="AB", layout="wide", initial_sidebar_state="expanded")
 apply_styles()
 
-PAGES = ["Home", "Mock Interview", "AI Coach", "Question Bank", "Results", "Profile", "About"]
-LEVELS = ["Student / Fresher", "Beginner", "Intermediate"]
-DIFFICULTIES = ["All", "Easy", "Medium", "Hard"]
+PAGES = ["Home", "Interview", "Question Suggestions", "Results", "Notes", "AI Coach", "Profile", "About"]
+LEVELS = ["Student / Fresher", "Beginner", "Intermediate", "Advanced"]
+DIFFICULTIES = ["Adaptive", "Easy", "Medium", "Hard"]
 
 
 def init_state():
     defaults = {
         "page": "Home",
         "user_id": None,
-        "questions": [],
+        "interview_topic": "",
+        "interview_level": "Student / Fresher",
+        "interview_difficulty": "Adaptive",
+        "interview_questions": [],
         "question_index": 0,
-        "feedback": [],
-        "subject": "Arrays",
-        "difficulty": "All",
-        "coach_output": "",
-        "last_error": "",
+        "interview_transcript": [],
+        "current_feedback": "",
+        "current_answer": "",
+        "interview_complete": False,
+        "result_saved": False,
+        "suggestions": [],
+        "coach_chat": [],
     }
     for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+        st.session_state.setdefault(key, value)
 
 
 def go_to(page):
@@ -67,57 +63,49 @@ def go_to(page):
 
 
 def reset_interview():
-    st.session_state.questions = []
-    st.session_state.question_index = 0
-    st.session_state.feedback = []
+    for key, value in {
+        "interview_topic": "",
+        "interview_questions": [],
+        "question_index": 0,
+        "interview_transcript": [],
+        "current_feedback": "",
+        "current_answer": "",
+        "interview_complete": False,
+        "result_saved": False,
+    }.items():
+        st.session_state[key] = value
 
 
 def logout():
     reset_interview()
-    for key in ["user_id", "coach_output", "last_error"]:
-        st.session_state.pop(key, None)
     st.session_state.user_id = None
     st.session_state.page = "Home"
+    st.session_state.coach_chat = []
     st.rerun()
 
 
-def score_from_feedback(feedback_text, answer):
-    """Use the AI's score when present; otherwise use the deterministic fallback score."""
-    matches = re.findall(r"\b(?:score|rating)\D{0,20}([1-9]|10)\s*(?:/|out of)?\s*10\b", feedback_text, re.I)
-    if matches:
-        return float(matches[-1])
-    words = len(answer.split())
-    return float(5 if words < 20 else 7 if words < 45 else 9)
+def safe(text):
+    return html.escape(str(text))
 
 
 def show_auth():
     st.markdown(
         """
-        <div class="auth-shell">
+        <div class="auth-shell glass reveal">
             <div class="auth-brand">AB</div>
             <div class="eyebrow">AI-BENCH</div>
-            <h1>Subject interview practice, powered by AI.</h1>
-            <p>Sign in to save mock interviews, track progress and continue practising across your core subjects.</p>
+            <h1>Your personal AI interview room.</h1>
+            <p>Practise anything, at any level. Let the AI interviewer adapt to your answers, track your performance and help you improve.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
     login_tab, signup_tab = st.tabs(["Log in", "Create account"])
-
     with login_tab:
-        with st.form("login_form", clear_on_submit=False):
-            username = st.text_input("Username", key="login_username", autocomplete="username")
-            password = st.text_input(
-                "Password",
-                type="password",
-                key="login_password",
-                autocomplete="current-password",
-            )
-            submit = st.form_submit_button(
-                "Log in", type="primary", use_container_width=True
-            )
-
+        with st.form("login_form"):
+            username = st.text_input("Username", autocomplete="username")
+            password = st.text_input("Password", type="password", autocomplete="current-password")
+            submit = st.form_submit_button("Log in", type="primary", use_container_width=True)
         if submit:
             if not username.strip() or not password:
                 st.warning("Enter both your username and password.")
@@ -125,38 +113,17 @@ def show_auth():
                 user = authenticate_user(username, password)
                 if user:
                     st.session_state.user_id = user["id"]
-                    st.session_state.page = "Home"
                     st.rerun()
                 else:
                     st.error("Incorrect username or password.")
-
     with signup_tab:
-        with st.form("signup_form", clear_on_submit=False):
-            name = st.text_input("Name", key="signup_name", autocomplete="name")
-            username = st.text_input(
-                "Username",
-                key="signup_username",
-                help="Use 3–30 letters, numbers, dots, underscores or hyphens.",
-                autocomplete="username",
-            )
-            password = st.text_input(
-                "Password",
-                type="password",
-                key="signup_password",
-                help="Use at least 8 characters.",
-                autocomplete="new-password",
-            )
-            confirm = st.text_input(
-                "Confirm password",
-                type="password",
-                key="signup_confirm",
-                autocomplete="new-password",
-            )
-            level = st.selectbox("Level", LEVELS, key="signup_level")
-            submit = st.form_submit_button(
-                "Create account", type="primary", use_container_width=True
-            )
-
+        with st.form("signup_form"):
+            name = st.text_input("Name", autocomplete="name")
+            username = st.text_input("Username", help="3–30 letters, numbers, dots, underscores or hyphens.", autocomplete="username")
+            password = st.text_input("Password", type="password", help="At least 8 characters.", autocomplete="new-password")
+            confirm = st.text_input("Confirm password", type="password", autocomplete="new-password")
+            level = st.selectbox("Experience level", LEVELS)
+            submit = st.form_submit_button("Create account", type="primary", use_container_width=True)
         if submit:
             if password != confirm:
                 st.error("Passwords do not match.")
@@ -164,13 +131,11 @@ def show_auth():
                 ok, message = create_user(username, password, name, level)
                 if ok:
                     st.success(message)
-                    st.info("Open the Log in tab to sign in.")
                 else:
                     st.error(message)
 
 
 init_state()
-
 if not st.session_state.user_id:
     show_auth()
     st.stop()
@@ -178,391 +143,258 @@ if not st.session_state.user_id:
 user = get_user(st.session_state.user_id)
 if not user:
     st.session_state.user_id = None
-    st.session_state.page = "Home"
     st.rerun()
 
-bank = load_question_bank()
-subjects = get_subjects(bank)
 results = load_results(user["id"])
+notes = load_notes(user["id"])
 
-# ---------- Sidebar ----------
 with st.sidebar:
     st.markdown(
         """
         <div class="brand">
             <span class="brand-mark">AB</span>
-            <div><strong>AI-bench</strong><small>Subject Interview Coach</small></div>
+            <div><strong>AI-bench</strong><small>AI Interview Coach</small></div>
         </div>
-        <div class="nav-label">NAVIGATION</div>
+        <div class="ai-status"><span class="status-dot"></span> AI engine connected</div>
+        <div class="nav-label">WORKSPACE</div>
         """,
         unsafe_allow_html=True,
     )
-
+    if not ai_available():
+        st.markdown('<div class="api-warning">AI key not detected. The app can still run with local fallbacks.</div>', unsafe_allow_html=True)
     for page in PAGES:
-        is_active = st.session_state.page == page
-        if st.button(
-            page,
-            key=f"nav_{page}",
-            use_container_width=True,
-            type="primary" if is_active else "secondary",
-        ):
+        if st.button(page, key=f"nav_{page}", use_container_width=True, type="primary" if st.session_state.page == page else "secondary"):
             go_to(page)
-
     st.divider()
-    safe_name = html.escape(user["name"])
-    safe_username = html.escape(user["username"])
     st.markdown(
-        f"""
-        <div class="sidebar-user">
-            <span>Signed in as</span>
-            <strong>{safe_name}</strong>
-            <small>@{safe_username}</small>
-        </div>
-        """,
+        f'<div class="sidebar-user"><span>Signed in as</span><strong>{safe(user["name"])}</strong><small>@{safe(user["username"])}</small></div>',
         unsafe_allow_html=True,
     )
-
-    if st.button("Log out", key="logout_button", use_container_width=True):
+    if st.button("Log out", key="logout", use_container_width=True):
         logout()
 
-
-# ---------- Home ----------
+# HOME
 if st.session_state.page == "Home":
-    page_header(
-        "Prepare by subject. Perform with confidence.",
-        "AI-powered subject interview practice",
-        "Practise Arrays, Linked List, Stack, Queue, DBMS and OS through focused questions and instant coaching.",
-    )
-
+    page_header("AI INTERVIEW COACH", f"Welcome back, {safe(user['name']).split(' ')[0]}.", "Prepare for any interview with a dynamic AI interviewer, smart question suggestions and a private progress workspace.")
     scores = [float(r["score"]) for r in results]
     average = round(sum(scores) / len(scores), 1) if scores else 0
     best = max(scores) if scores else 0
-
     c1, c2, c3, c4 = st.columns(4)
     for col, label, value, caption in [
-        (c1, "Practice sessions", len(results), "Completed"),
-        (c2, "Average score", f"{average} / 10", "Answer quality"),
-        (c3, "Best score", f"{best} / 10", "Personal best"),
-        (c4, "Subjects", len(subjects), "Core subjects"),
+        (c1, "Interviews", len(results), "Completed sessions"),
+        (c2, "Average", f"{average}/10", "Overall performance"),
+        (c3, "Best", f"{best}/10", "Personal best"),
+        (c4, "Notes", len(notes), "Saved privately"),
     ]:
         with col:
             metric_card(label, value, caption)
 
     st.markdown(
         """
-        <div class="hero-panel">
-            <span class="tag">AI MOCK INTERVIEW</span>
-            <h2>Turn your subjects into interview practice.</h2>
-            <p>Choose a subject and difficulty, answer one question at a time, then get AI feedback on your explanation and technical understanding.</p>
+        <div class="hero-panel glass reveal">
+            <span class="tag">LLM-POWERED</span>
+            <h2>Don't study for one fixed question list.</h2>
+            <p>Tell AI-bench what you are preparing for. It builds the interview around your goal, adapts to your answers and gives you a real performance review at the end.</p>
+            <div class="hero-pills"><span>Any role</span><span>Any subject</span><span>Adaptive difficulty</span><span>Saved results</span></div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    section_title("Core subjects", "Choose a subject to start focused practice.")
-    cols = st.columns(3)
-    for index, subject in enumerate(subjects):
-        with cols[index % 3]:
-            glass_card(
-                subject,
-                bank["subjects"][subject]["description"],
-                "SUBJECT",
-            )
-            if st.button(
-                f"Practice {subject}",
-                key=f"home_subject_{index}",
-                use_container_width=True,
-            ):
-                st.session_state.subject = subject
-                go_to("Mock Interview")
-
-    if st.button("Start a mock interview", type="primary", use_container_width=True):
-        go_to("Mock Interview")
-
-
-# ---------- Mock Interview ----------
-elif st.session_state.page == "Mock Interview":
-    page_header(
-        "Mock Interview",
-        "Subject-focused questions, one at a time.",
-        "Answer as if an interviewer is sitting in front of you. Keep your explanation clear and technically correct.",
-    )
-
-    questions = st.session_state.questions
-
-    if not questions:
-        with st.form("interview_setup"):
-            subject = st.selectbox(
-                "Subject",
-                subjects,
-                index=subjects.index(st.session_state.subject)
-                if st.session_state.subject in subjects
-                else 0,
-            )
-            difficulty = st.selectbox("Difficulty", DIFFICULTIES)
-            count_options = [3, 5, 6]
-            available = len(get_question_pool(bank, subject, difficulty))
-            allowed = [n for n in count_options if n <= available] or ([available] if available else [])
-            count = st.select_slider(
-                "Questions",
-                options=allowed if allowed else [1],
-                value=min(5, available) if available else 1,
-                disabled=not bool(available),
-            )
-            start = st.form_submit_button(
-                "Begin interview", type="primary", use_container_width=True
-            )
-
-        if start:
-            selected = create_interview(bank, subject, difficulty, count)
-            if not selected:
-                st.error("No questions are available for this selection.")
-            else:
-                st.session_state.subject = subject
-                st.session_state.difficulty = difficulty
-                st.session_state.questions = selected
-                st.session_state.question_index = 0
-                st.session_state.feedback = []
-                st.rerun()
-    else:
-        index = st.session_state.question_index
-
-        if index >= len(questions):
-            reset_interview()
-            st.rerun()
-
-        question = questions[index]
-        st.progress((index + 1) / len(questions))
-        st.caption(
-            f"Question {index + 1} of {len(questions)} · "
-            f"{st.session_state.subject} · {question['difficulty']}"
-        )
-
-        st.markdown(
-            f"""
-            <div class="question-panel">
-                <span class="tag">QUESTION {index + 1}</span>
-                <h2>{html.escape(question['question'])}</h2>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        answer = st.text_area(
-            "Your answer",
-            key=f"answer_{index}",
-            height=190,
-            placeholder="Explain your answer as you would to an interviewer...",
-        )
-
-        left, right = st.columns(2)
-        with left:
-            submit = st.button(
-                "Submit answer",
-                type="primary",
-                use_container_width=True,
-                key=f"submit_answer_{index}",
-            )
-        with right:
-            end = st.button(
-                "End interview",
-                use_container_width=True,
-                key=f"end_interview_{index}",
-            )
-
-        if submit:
-            if not answer.strip():
-                st.warning("Write an answer before submitting.")
-            else:
-                with st.spinner("Reviewing your answer..."):
-                    feedback = evaluate_answer(
-                        st.session_state.subject,
-                        question["question"],
-                        answer,
-                    )
-
-                answer_score = score_from_feedback(feedback, answer)
-                st.session_state.feedback.append(
-                    {
-                        "question": question["question"],
-                        "answer": answer,
-                        "feedback": feedback,
-                        "score": answer_score,
-                    }
-                )
-
-                if index + 1 >= len(questions):
-                    score = calculate_session_score(st.session_state.feedback)
-                    save_result(
-                        user["id"],
-                        st.session_state.subject,
-                        st.session_state.difficulty,
-                        score,
-                        len(st.session_state.feedback),
-                    )
-                    st.session_state.questions = []
-                    st.session_state.question_index = 0
-                    st.session_state.page = "Results"
-                else:
-                    st.session_state.question_index += 1
-                st.rerun()
-
-        if end:
-            reset_interview()
-            go_to("Home")
-
-        # Feedback from the most recently submitted answer is shown before moving on.
-        if st.session_state.feedback:
-            latest = st.session_state.feedback[-1]
-            section_title("Latest feedback", "Review the previous answer before continuing.")
-            metric_card("Answer score", f"{latest['score']} / 10", "AI estimate")
-            feedback_card(latest["feedback"])
-
-
-# ---------- AI Coach ----------
-elif st.session_state.page == "AI Coach":
-    page_header(
-        "AI Coach",
-        "Get help with a specific subject.",
-        "Revise concepts, improve explanations or build a focused preparation plan.",
-    )
-
-    subject = st.selectbox("Subject", subjects)
-    level = st.selectbox(
-        "Level",
-        LEVELS,
-        index=LEVELS.index(user["level"]) if user["level"] in LEVELS else 0,
-    )
-    goal = st.selectbox(
-        "Goal",
-        [
-            "Revise core concepts",
-            "Improve interview answers",
-            "Prepare difficult questions",
-            "Build a study plan",
-        ],
-    )
-    request = st.text_area(
-        "Specific request",
-        placeholder="Example: Explain deadlock in OS and then ask me two interview questions.",
-    )
-
-    if st.button("Ask AI Coach", type="primary"):
-        extra = f" Specific request: {request.strip()}" if request.strip() else ""
-        with st.spinner("Preparing your coaching response..."):
-            st.session_state.coach_output = coach_message(
-                subject, goal + extra, level
-            )
-
-    if not get_ai_client():
-        st.info(
-            "Live AI is not configured. Add OPENAI_API_KEY to .env; "
-            "the question bank, login, interviews and results still work offline."
-        )
-
-    if st.session_state.coach_output:
-        section_title("Coach response")
-        feedback_card(st.session_state.coach_output)
-
-
-# ---------- Question Bank ----------
-elif st.session_state.page == "Question Bank":
-    page_header(
-        "Question Bank",
-        "Build confidence before the mock interview.",
-        "Browse subject-specific questions and practise explaining the answer without looking at notes.",
-    )
-
-    subject = st.selectbox("Subject", subjects)
-    difficulty = st.selectbox("Difficulty", DIFFICULTIES)
-    pool = get_question_pool(bank, subject, difficulty)
-
-    if not pool:
-        st.info("No questions match this filter.")
-    else:
-        st.caption(f"{len(pool)} question{'s' if len(pool) != 1 else ''} available")
-        for number, item in enumerate(pool, start=1):
-            st.markdown(
-                f"""
-                <div class="list-question">
-                    <span>{number:02}</span>
-                    <div>
-                        <strong>{html.escape(item['difficulty'])}</strong>
-                        <p>{html.escape(item['question'])}</p>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-
-# ---------- Results ----------
-elif st.session_state.page == "Results":
-    page_header(
-        "Results & Progress",
-        "See which subjects need more practice.",
-        "Your results are saved to your account in the local SQLite database.",
-    )
-
-    scores = [float(r["score"]) for r in results]
-    average = round(sum(scores) / len(scores), 1) if scores else 0
-    best = max(scores) if scores else 0
-
     c1, c2, c3 = st.columns(3)
-    for col, label, value in [
-        (c1, "Sessions", len(results)),
-        (c2, "Average", f"{average} / 10"),
-        (c3, "Best", f"{best} / 10"),
-    ]:
-        with col:
-            metric_card(label, value, "Interview practice")
+    with c1:
+        glass_card("Start an interview", "Choose a role, subject or custom topic and let the AI take the interviewer seat.", "PRACTISE")
+        if st.button("Start now →", key="home_start", type="primary", use_container_width=True):
+            reset_interview(); go_to("Interview")
+    with c2:
+        glass_card("Question suggestions", "Get a structured set of realistic questions before you begin practising.", "PREPARE")
+        if st.button("Generate questions →", key="home_suggest", use_container_width=True):
+            go_to("Question Suggestions")
+    with c3:
+        glass_card("AI Coach", "Ask for explanations, study plans, interview tips or help improving an answer.", "IMPROVE")
+        if st.button("Open coach →", key="home_coach", use_container_width=True):
+            go_to("AI Coach")
 
-    if results:
-        section_title("Subject performance", "Average score across completed sessions.")
-        performance = {}
-        for result in results:
-            performance.setdefault(result["subject"], []).append(float(result["score"]))
-        performance = {
-            subject: round(sum(values) / len(values), 1)
-            for subject, values in performance.items()
-        }
-        st.bar_chart(performance)
-
-        section_title("Recent sessions", "Your latest completed interviews.")
-        display_results = [
-            {
-                "Date": r["date"],
-                "Subject": r["subject"],
-                "Difficulty": r["difficulty"],
-                "Score": f"{float(r['score']):.1f} / 10",
-                "Questions": r["questions"],
-            }
-            for r in results
-        ]
-        st.dataframe(display_results, use_container_width=True, hide_index=True)
+    section_title("Recent performance", "Your latest saved interviews")
+    if not results:
+        st.info("Your first interview will appear here after you complete it.")
     else:
-        st.info("Complete a mock interview to start building your progress history.")
+        for result in results[:3]:
+            st.markdown(f'<div class="result-row glass"><div><strong>{safe(result["subject"])}</strong><span>{safe(result["date"])} · {safe(result["difficulty"])}</span></div><b>{float(result["score"]):.1f}<small>/10</small></b></div>', unsafe_allow_html=True)
 
+# INTERVIEW
+elif st.session_state.page == "Interview":
+    page_header("MOCK INTERVIEW", "Your interview. Your topic. AI adapts.", "Start with a role, subject, technology, viva topic or anything else you need to prepare for.")
+    if not st.session_state.interview_questions and not st.session_state.interview_complete:
+        with st.form("interview_setup"):
+            topic = st.text_input("What are you preparing for?", placeholder="e.g. Python developer internship, DBMS viva, Java OOP, HR interview, React...")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                level = st.selectbox("Your level", LEVELS, index=LEVELS.index(user["level"]) if user["level"] in LEVELS else 0)
+            with c2:
+                difficulty = st.selectbox("Interview style", DIFFICULTIES)
+            with c3:
+                count = st.select_slider("Questions", options=[3, 5, 7, 10], value=5)
+            start = st.form_submit_button("Build my interview", type="primary", use_container_width=True)
+        if start:
+            if not topic.strip():
+                st.warning("Tell the interviewer what you want to prepare for first.")
+            else:
+                with st.spinner("Building your interview..."):
+                    questions = generate_interview(topic.strip(), level, difficulty, count)
+                st.session_state.interview_topic = topic.strip()
+                st.session_state.interview_level = level
+                st.session_state.interview_difficulty = difficulty
+                st.session_state.interview_questions = questions
+                st.session_state.question_index = 0
+                st.session_state.interview_transcript = []
+                st.session_state.current_feedback = ""
+                st.session_state.interview_complete = False
+                st.session_state.result_saved = False
+                st.rerun()
+    elif st.session_state.interview_complete:
+        score = calculate_session_score(st.session_state.interview_transcript)
+        page_header("INTERVIEW COMPLETE", f"You scored {score}/10.", "Your full interview is saved in Results. Use the feedback to decide what to practise next.")
+        stat_strip([("Score", f"{score}/10"), ("Questions", len(st.session_state.interview_transcript)), ("Topic", st.session_state.interview_topic)])
+        if st.button("View full results →", type="primary", use_container_width=True):
+            go_to("Results")
+        if st.button("Start another interview", use_container_width=True):
+            reset_interview(); st.rerun()
+    else:
+        idx = st.session_state.question_index
+        questions = st.session_state.interview_questions
+        question = questions[idx]
+        total = len(questions)
+        st.progress(idx / total if total else 0)
+        st.markdown(f'<div class="interview-meta"><span>QUESTION {idx + 1} OF {total}</span><span>{safe(st.session_state.interview_topic)}</span><span>{safe(st.session_state.interview_difficulty)}</span></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="question-panel glass reveal"><span class="tag">AI INTERVIEWER</span><h2>{safe(question)}</h2></div>', unsafe_allow_html=True)
 
-# ---------- Profile ----------
+        if not st.session_state.current_feedback:
+            with st.form(f"answer_form_{idx}"):
+                answer = st.text_area("Your answer", height=190, placeholder="Explain your answer as if you were speaking to an interviewer...")
+                submit = st.form_submit_button("Submit answer", type="primary", use_container_width=True)
+            if submit:
+                if not answer.strip():
+                    st.warning("Write an answer before submitting.")
+                else:
+                    with st.spinner("AI is reviewing your answer..."):
+                        feedback = evaluate_answer(st.session_state.interview_topic, question, answer.strip(), st.session_state.interview_level)
+                    score = score_from_feedback(feedback, answer)
+                    st.session_state.interview_transcript.append({"question": question, "answer": answer.strip(), "feedback": feedback, "score": score})
+                    st.session_state.current_feedback = feedback
+                    if idx + 1 < total:
+                        with st.spinner("Adapting the next question..."):
+                            next_question = generate_next_question(st.session_state.interview_topic, st.session_state.interview_level, st.session_state.interview_difficulty, st.session_state.interview_transcript, idx + 2)
+                        st.session_state.interview_questions[idx + 1] = next_question
+                    else:
+                        final_score = calculate_session_score(st.session_state.interview_transcript)
+                        save_result(st.session_state.user_id, st.session_state.interview_topic, st.session_state.interview_difficulty, final_score, total, st.session_state.interview_transcript)
+                        st.session_state.interview_complete = True
+                        st.session_state.result_saved = True
+                    st.rerun()
+        else:
+            st.markdown('<div class="answer-label">AI REVIEW</div>', unsafe_allow_html=True)
+            feedback_card(st.session_state.current_feedback)
+            if idx + 1 < total:
+                if st.button("Next question →", type="primary", use_container_width=True):
+                    st.session_state.question_index += 1
+                    st.session_state.current_feedback = ""
+                    st.rerun()
+            else:
+                st.success("Interview complete. Your result has been saved.")
+                if st.button("See my results →", type="primary", use_container_width=True):
+                    go_to("Results")
+
+# QUESTION SUGGESTIONS
+elif st.session_state.page == "Question Suggestions":
+    page_header("QUESTION LAB", "Know what to practise before you start.", "Generate realistic interview questions for any role, subject or technology, then use them as your preparation checklist.")
+    with st.form("suggestion_form"):
+        topic = st.text_input("Topic / role", placeholder="e.g. Data structures viva, Python, cybersecurity internship...")
+        level = st.selectbox("Level", LEVELS, index=LEVELS.index(user["level"]) if user["level"] in LEVELS else 0)
+        generate = st.form_submit_button("Generate suggestions", type="primary", use_container_width=True)
+    if generate:
+        if not topic.strip():
+            st.warning("Enter a topic or role first.")
+        else:
+            with st.spinner("Generating a question set..."):
+                st.session_state.suggestions = suggest_questions(topic.strip(), level)
+            st.session_state.suggestion_topic = topic.strip()
+    if st.session_state.suggestions:
+        stat_strip([("Topic", st.session_state.get("suggestion_topic", "")), ("Categories", len(st.session_state.suggestions)), ("Purpose", "Practice")])
+        for category in st.session_state.suggestions:
+            section_title(category["name"])
+            for number, question in enumerate(category["questions"], 1):
+                st.markdown(f'<div class="suggestion-item glass"><span>{number:02d}</span><p>{safe(question)}</p></div>', unsafe_allow_html=True)
+        if st.button("Start an interview on this topic →", type="primary", use_container_width=True):
+            reset_interview()
+            st.session_state.interview_topic = st.session_state.get("suggestion_topic", "")
+            go_to("Interview")
+
+# RESULTS
+elif st.session_state.page == "Results":
+    page_header("RESULTS", "See how your interview performance changes.", "Every completed interview keeps its questions, answers, feedback and score so you can review the details later.")
+    if not results:
+        st.info("No completed interviews yet. Start one from the Interview page.")
+    else:
+        scores = [float(r["score"]) for r in results]
+        stat_strip([("Sessions", len(results)), ("Average", f"{sum(scores)/len(scores):.1f}/10"), ("Best", f"{max(scores):.1f}/10")])
+        for i, result in enumerate(results):
+            with st.expander(f"{result['subject']}  ·  {float(result['score']):.1f}/10  ·  {result['date']}"):
+                st.caption(f"{result['difficulty']} · {result['questions']} questions")
+                for q_index, item in enumerate(result.get("transcript", []), 1):
+                    st.markdown(f"**Q{q_index}. {item.get('question', '')}**")
+                    st.markdown(f"> {item.get('answer', '')}")
+                    st.markdown(item.get("feedback", "No feedback saved."))
+                    st.divider()
+
+# NOTES
+elif st.session_state.page == "Notes":
+    page_header("PRIVATE NOTES", "Build your own interview notebook.", "Save definitions, mistakes, reminders, topics to revise and anything else you want beside your AI practice.")
+    with st.form("new_note", clear_on_submit=True):
+        title = st.text_input("Note title", placeholder="e.g. DBMS — things I keep forgetting")
+        content = st.text_area("Note", height=150, placeholder="Write your study note here...")
+        save = st.form_submit_button("Save note", type="primary", use_container_width=True)
+    if save:
+        ok, message = create_note(st.session_state.user_id, title, content)
+        if ok:
+            st.success(message)
+            st.rerun()
+        else:
+            st.error(message)
+    section_title("Your notebook", f"{len(notes)} saved notes")
+    if not notes:
+        st.info("No notes yet. Add your first one above.")
+    for note in notes:
+        with st.expander(f"{note['title']}  ·  {note['updated_at']}"):
+            st.markdown(note["content"])
+            if st.button("Delete note", key=f"delete_note_{note['id']}"):
+                delete_note(st.session_state.user_id, note["id"])
+                st.rerun()
+
+# AI COACH
+elif st.session_state.page == "AI Coach":
+    page_header("AI COACH", "Ask. Learn. Improve.", "A conversational space for technical explanations, preparation plans, answer reviews and interview confidence.")
+    if not st.session_state.coach_chat:
+        st.markdown('<div class="coach-intro glass"><span class="tag">TRY ASKING</span><div class="coach-prompts"><span>Explain normalization simply</span><span>How do I answer “tell me about yourself”?</span><span>Make me a 7-day Python plan</span><span>What am I weak at?</span></div></div>', unsafe_allow_html=True)
+    for message in st.session_state.coach_chat:
+        role = "You" if message["role"] == "user" else "AI-bench"
+        st.markdown(f'<div class="chat-bubble {message["role"]}"><span>{role}</span><p>{safe(message["content"])}</p></div>', unsafe_allow_html=True)
+    with st.form("coach_form", clear_on_submit=True):
+        message = st.text_area("Message", height=100, placeholder="Ask anything about your interview preparation...")
+        send = st.form_submit_button("Ask AI-bench", type="primary", use_container_width=True)
+    if send and message.strip():
+        st.session_state.coach_chat.append({"role": "user", "content": message.strip()})
+        with st.spinner("Thinking..."):
+            reply = freeform_coach(message.strip(), user["level"])
+        st.session_state.coach_chat.append({"role": "assistant", "content": reply})
+        st.rerun()
+
+# PROFILE
 elif st.session_state.page == "Profile":
-    page_header(
-        "Profile",
-        "Manage your AI-bench account.",
-        "Your account keeps your profile and interview progress together in the local database.",
-    )
-
+    page_header("PROFILE", "Your preparation profile.", "Keep your experience level up to date so the AI can calibrate interview difficulty and coaching.")
     with st.form("profile_form"):
         name = st.text_input("Name", value=user["name"])
-        level = st.selectbox(
-            "Level",
-            LEVELS,
-            index=LEVELS.index(user["level"]) if user["level"] in LEVELS else 0,
-        )
-        save = st.form_submit_button(
-            "Save profile", type="primary", use_container_width=True
-        )
-
+        level = st.selectbox("Experience level", LEVELS, index=LEVELS.index(user["level"]) if user["level"] in LEVELS else 0)
+        save = st.form_submit_button("Save profile", type="primary", use_container_width=True)
     if save:
         ok, message = update_user(user["id"], name, level)
         if ok:
@@ -570,31 +402,17 @@ elif st.session_state.page == "Profile":
             st.rerun()
         else:
             st.error(message)
+    section_title("Account")
+    st.markdown(f'<div class="profile-card glass"><span>USERNAME</span><strong>@{safe(user["username"])}</strong><span>MEMBER SINCE</span><strong>{safe(user["created_at"])}</strong></div>', unsafe_allow_html=True)
 
-    glass_card(
-        "Account",
-        f"Username: @{user['username']} · Created: {user['created_at']}",
-        "ACCOUNT",
-    )
-
-
-# ---------- About ----------
-else:
-    page_header(
-        "About AI-bench",
-        "A focused practice platform for subject-based interviews.",
-        "AI-bench combines a subject question bank, mock interview flow, progress tracking and optional AI coaching in one student-friendly workspace.",
-    )
-
-    cols = st.columns(3)
-    for col, title, text in zip(
-        cols,
-        ["Subjects", "Mock Interviews", "AI Coaching"],
-        [
-            "Arrays, Linked List, Stack, Queue, DBMS and OS.",
-            "Answer questions one by one and practise explaining concepts naturally.",
-            "Get targeted guidance when you want deeper explanations or answer feedback.",
-        ],
-    ):
-        with col:
-            glass_card(title, text, "AI-BENCH")
+# ABOUT
+elif st.session_state.page == "About":
+    page_header("ABOUT AI-BENCH", "A student-first interview practice workspace.", "Built to make interview preparation feel less like memorising a question bank and more like having a personal practice partner.")
+    c1, c2 = st.columns(2)
+    with c1:
+        glass_card("Dynamic interviews", "The AI creates and adapts questions around the user's own role, subject or goal.", "CORE")
+        glass_card("Performance memory", "Completed interviews stay attached to the account so students can review answers and scores later.", "TRACK")
+    with c2:
+        glass_card("Question lab", "Generate a preparation checklist for unfamiliar roles, technologies and viva topics.", "PREPARE")
+        glass_card("Private notes", "Keep personal revision notes separate from AI feedback and interview history.", "ORGANISE")
+    st.markdown('<div class="about-footer glass"><strong>AI-bench</strong><span>AI-powered interview preparation for students.</span></div>', unsafe_allow_html=True)
