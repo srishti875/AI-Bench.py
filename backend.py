@@ -1,54 +1,54 @@
-"""Application logic: question bank, AI coaching and interview scoring."""
+"""AI-bench AI layer: dynamic interviews, question suggestions and coaching."""
 
 import json
 import os
 import random
+import re
 from pathlib import Path
-
-BASE_DIR = Path(__file__).parent
-QUESTION_FILE = BASE_DIR / "data" / "interview_questions.json"
 
 try:
     from dotenv import load_dotenv
-
-    load_dotenv(BASE_DIR / ".env")
+    load_dotenv(Path(__file__).parent / ".env")
 except ImportError:
     pass
 
 try:
     from openai import OpenAI
-except ImportError:
+except ImportError:  # pragma: no cover - handled gracefully in the UI
     OpenAI = None
 
+BASE_DIR = Path(__file__).parent
 
-def load_question_bank():
-    if not QUESTION_FILE.exists():
-        raise FileNotFoundError(f"Question bank not found: {QUESTION_FILE}")
-    with QUESTION_FILE.open("r", encoding="utf-8") as file:
-        bank = json.load(file)
-
-    if not isinstance(bank, dict) or not isinstance(bank.get("subjects"), dict):
-        raise ValueError("Question bank has an invalid format.")
-    return bank
-
-
-def get_subjects(bank):
-    return list(bank.get("subjects", {}).keys())
-
-
-def get_question_pool(bank, subject, difficulty="All"):
-    questions = bank.get("subjects", {}).get(subject, {}).get("questions", [])
-    if difficulty == "All":
-        return list(questions)
-    return [q for q in questions if q.get("difficulty") == difficulty]
-
-
-def create_interview(bank, subject, difficulty, question_count):
-    pool = get_question_pool(bank, subject, difficulty)
-    if not pool or question_count <= 0:
-        return []
-    random.shuffle(pool)
-    return pool[: min(question_count, len(pool))]
+FALLBACK_TOPICS = {
+    "software development": [
+        "Explain the difference between a stack and a queue.",
+        "How would you approach debugging a program that works locally but fails in production?",
+        "What is the purpose of abstraction in software design?",
+        "Explain time complexity and give an example of an O(n) operation.",
+        "How would you design a simple feature from requirements to deployment?",
+    ],
+    "python": [
+        "What is the difference between a list, tuple and set in Python?",
+        "Explain Python's mutable and immutable objects with an example.",
+        "What is inheritance and when would you use it in Python?",
+        "How do exceptions work in Python and how should they be handled?",
+        "What is the difference between a generator and a normal function returning a list?",
+    ],
+    "dbms": [
+        "What is normalization and why is it used in relational databases?",
+        "Explain the difference between DELETE, DROP and TRUNCATE.",
+        "What is a primary key and how is it different from a foreign key?",
+        "What is an index and what trade-off does it introduce?",
+        "Explain a transaction and the purpose of ACID properties.",
+    ],
+    "data structures": [
+        "What is the difference between an array and a linked list?",
+        "When would you choose a stack over a queue?",
+        "What is a binary search tree and what makes searching efficient in a balanced tree?",
+        "Explain how a hash table works at a high level.",
+        "What is the time complexity of searching, inserting and deleting in common data structures?",
+    ],
+}
 
 
 def get_ai_client():
@@ -57,16 +57,18 @@ def get_ai_client():
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not api_key:
         return None
-
-    # Keep the model configurable while using a current, cost-conscious default.
-    model = os.getenv("OPENAI_MODEL", "gemini").strip()
+    model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna").strip()
     try:
-        return OpenAI(api_key=api_key, timeout=45.0, max_retries=2), model
+        return OpenAI(api_key=api_key, timeout=60.0, max_retries=2), model
     except Exception:
         return None
 
 
-def ask_ai(prompt, fallback):
+def ai_available():
+    return get_ai_client() is not None
+
+
+def ask_ai(prompt, fallback, *, instructions=None):
     client_info = get_ai_client()
     if client_info is None:
         return fallback
@@ -75,87 +77,254 @@ def ask_ai(prompt, fallback):
     try:
         response = client.responses.create(
             model=model,
-            instructions=(
-                "You are AI-bench, an AI subject interview coach. "
-                "Help students prepare for technical and subject-based interviews. "
-                "Be accurate, concise and student-friendly. "
-                "When scoring an answer, explicitly write 'Score: X/10'."
+            instructions=instructions or (
+                "You are AI-bench, a professional interview coach. "
+                "Be accurate, practical, concise and encouraging. "
+                "Never invent facts when a technical detail matters."
             ),
             input=prompt,
         )
         text = getattr(response, "output_text", "") or ""
         return text.strip() or fallback
     except Exception:
-        # AI is an optional enhancement; never make the core app unusable because
-        # an API key, model, network connection or quota is unavailable.
         return fallback
 
 
-def fallback_feedback(question, answer):
-    words = len(answer.strip().split())
-    if words < 20:
-        return (
-            "Your answer is a little brief. Define the concept, explain how it works, "
-            "and add a simple example.\n\nScore: 5/10"
-        )
-    if words < 45:
-        return (
-            "Good foundation. Make the answer stronger with a clearer explanation, "
-            "an example, and the important complexity or use case.\n\nScore: 7/10"
-        )
-    return (
-        "Good detailed answer. Keep it structured: definition, explanation, example, "
-        "and interview-relevant points.\n\nScore: 9/10"
-    )
+def _extract_json(text):
+    text = (text or "").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}|\[.*\]", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
-def evaluate_answer(subject, question, answer):
-    fallback = fallback_feedback(question, answer)
+def _fallback_questions(topic, count):
+    topic_key = topic.lower().strip()
+    selected_pool = None
+    for key, pool in FALLBACK_TOPICS.items():
+        if key in topic_key or topic_key in key:
+            selected_pool = pool
+            break
+    if selected_pool is None:
+        selected_pool = [
+            f"What are the most important fundamentals of {topic}?",
+            f"Explain one common real-world use of {topic}.",
+            f"What is a common mistake beginners make when learning {topic}?",
+            f"How would you solve a practical problem involving {topic}?",
+            f"What trade-offs or limitations should a developer know about {topic}?",
+            f"How would you explain {topic} to someone with no technical background?",
+        ]
+    pool = list(selected_pool)
+    random.shuffle(pool)
+    return pool[:max(1, min(count, len(pool)))]
+
+
+def generate_interview(topic, level, difficulty, count):
+    """Generate a complete starter interview. The next question can later adapt to answers."""
+    count = max(1, min(int(count), 15))
+    fallback = _fallback_questions(topic, count)
     prompt = f"""
-Subject: {subject}
-Interview question: {question}
-Student answer: {answer}
+Create a mock interview for this candidate:
+Topic / role: {topic}
+Experience level: {level}
+Difficulty: {difficulty}
+Number of questions: {count}
 
-Review this answer for a subject-based technical interview.
+Return ONLY valid JSON in this exact shape:
+{{"questions": ["question 1", "question 2"]}}
 
-Give:
-1. What was correct or strong
-2. What is missing or incorrect
-3. A better way to structure the answer
-4. One short model answer or example
-5. A score from 1-10 with a brief reason
+Rules:
+- Ask one clear interview question per item.
+- Mix conceptual, practical and scenario questions where appropriate.
+- Match the candidate's level.
+- Do not provide answers.
+- Avoid repeating the same concept.
+- Questions must be relevant to the user's topic, even if it is unusual or custom.
+"""
+    raw = ask_ai(
+        prompt,
+        json.dumps({"questions": fallback}),
+        instructions=(
+            "You create high-quality interview questions. Output only valid JSON when JSON is requested."
+        ),
+    )
+    parsed = _extract_json(raw)
+    questions = parsed.get("questions", []) if isinstance(parsed, dict) else []
+    questions = [str(q).strip() for q in questions if str(q).strip()]
+    return questions[:count] or fallback
 
-End with exactly: Score: X/10
-Keep it student-friendly and interview focused.
+
+def generate_next_question(topic, level, difficulty, transcript, question_number):
+    """Generate an adaptive next question using the interview transcript."""
+    fallback = _fallback_questions(topic, 6)
+    used = {item.get("question", "").strip().lower() for item in transcript}
+    unused = [q for q in fallback if q.lower() not in used]
+    simple_fallback = unused[0] if unused else f"What would you improve or explore next when working with {topic}?"
+
+    compact = transcript[-5:]
+    prompt = f"""
+You are conducting an adaptive mock interview.
+Topic / role: {topic}
+Candidate level: {level}
+Difficulty: {difficulty}
+Next question number: {question_number}
+
+Previous exchange summary:
+{json.dumps(compact, ensure_ascii=False)}
+
+Ask exactly ONE next interview question.
+Adapt to the candidate's last answer: if it was weak, clarify fundamentals; if strong, increase depth or introduce a practical scenario.
+Do not give feedback or the answer yet. Return only the question text.
+"""
+    return ask_ai(
+        prompt,
+        simple_fallback,
+        instructions=(
+            "You are an adaptive interviewer. Ask exactly one question and nothing else."
+        ),
+    ).strip() or simple_fallback
+
+
+def evaluate_answer(topic, question, answer, level):
+    fallback = (
+        "### Quick feedback\n"
+        "Your answer has been recorded. Strengthen it by defining the concept, explaining how it works, and giving a practical example.\n\n"
+        "**Score: 6/10**"
+    )
+    prompt = f"""
+Evaluate this interview response.
+Topic / role: {topic}
+Candidate level: {level}
+Question: {question}
+Candidate answer: {answer}
+
+Return concise markdown with these sections:
+### What you did well
+### What to improve
+### Better answer structure
+### Model answer
+### Score
+
+Give a score from 1-10. End the response with exactly `Score: X/10`.
+Do not be overly harsh about minor wording differences. Focus on correctness, completeness, reasoning and communication.
 """
     return ask_ai(prompt, fallback)
 
 
-def coach_message(subject, goal, level):
-    fallback = (
-        f"For {subject}, revise the core definitions and important operations first. "
-        f"At the {level} level, practise explaining each concept aloud with a small example. "
-        f"Your current goal is: {goal}."
+def score_from_feedback(feedback_text, answer):
+    matches = re.findall(
+        r"\b(?:score|rating)\D{0,20}(10|[1-9])\s*(?:/|out of)?\s*10\b",
+        feedback_text or "",
+        re.I,
     )
-    prompt = (
-        f"Create a concise preparation plan for a {level} student preparing for a "
-        f"{subject} interview. Goal: {goal}. Include practical interview advice."
-    )
-    return ask_ai(prompt, fallback)
+    if matches:
+        return float(matches[-1])
+    words = len(answer.split())
+    return float(5 if words < 20 else 7 if words < 45 else 8)
 
 
 def calculate_session_score(items):
     if not items:
         return 0.0
+    scores = [float(item.get("score", 0)) for item in items if item.get("score") is not None]
+    return round(sum(scores) / len(scores), 1) if scores else 0.0
 
-    scores = []
-    for item in items:
-        explicit = item.get("score")
-        if isinstance(explicit, (int, float)):
-            scores.append(float(explicit))
+
+def suggest_questions(topic, level, count=12):
+    count = max(4, min(int(count), 20))
+    fallback = _fallback_questions(topic, count)
+    prompt = f"""
+The candidate wants interview question suggestions.
+Topic / role: {topic}
+Experience level: {level}
+
+Create {count} useful questions grouped into 3-4 logical categories.
+Return ONLY valid JSON:
+{{"categories": [{{"name": "Category", "questions": ["Question"]}}]}}
+
+Questions should be realistic, varied and useful for interview preparation.
+"""
+    raw = ask_ai(
+        prompt,
+        json.dumps({"categories": [{"name": "Suggested questions", "questions": fallback}]}),
+        instructions="Generate structured interview question suggestions. Return valid JSON only.",
+    )
+    parsed = _extract_json(raw)
+    categories = parsed.get("categories", []) if isinstance(parsed, dict) else []
+    clean = []
+    for category in categories:
+        if not isinstance(category, dict):
             continue
+        questions = [str(q).strip() for q in category.get("questions", []) if str(q).strip()]
+        if questions:
+            clean.append({"name": str(category.get("name", "Questions")), "questions": questions})
+    return clean or [{"name": "Suggested questions", "questions": fallback}]
 
-        words = len(item.get("answer", "").split())
-        scores.append(5.0 if words < 20 else 7.0 if words < 45 else 9.0)
 
-    return round(sum(scores) / len(scores), 1)
+def coach_message(topic, goal, level):
+    fallback = (
+        f"For **{topic}**, start with the fundamentals, practise explaining concepts aloud, "
+        f"and use short examples. For your goal — {goal} — focus on clarity, correctness and structured answers."
+    )
+    prompt = f"""
+Act as a personal interview coach.
+Topic / role: {topic}
+Level: {level}
+Goal: {goal}
+
+Give a practical response with:
+- what to study first
+- how to practise
+- common mistakes to avoid
+- one interview tip
+Keep it concise and student-friendly.
+"""
+    return ask_ai(prompt, fallback)
+
+
+def freeform_coach(message, level="Student / Fresher"):
+    fallback = (
+        "I can help with interview preparation, answer improvement, technical concepts, "
+        "mock questions and confidence-building. Tell me what you are preparing for."
+    )
+    prompt = f"""
+You are AI-bench Coach helping a {level} student.
+Student message: {message}
+
+Respond like a helpful professional interview coach. If the student asks a technical question, explain it accurately with a small example. If they ask for preparation advice, give actionable steps. Do not pretend to know personal details that were not provided.
+"""
+    return ask_ai(prompt, fallback)
+
+
+def create_interview(bank, subject, difficulty, question_count):
+    """Backward-compatible wrapper for older app code."""
+    return [{"question": q, "difficulty": difficulty} for q in generate_interview(subject, "Student / Fresher", difficulty, question_count)]
+
+
+def load_question_bank():
+    path = BASE_DIR / "data" / "interview_questions.json"
+    if not path.exists():
+        return {"subjects": {}}
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return {"subjects": {}}
+
+
+def get_subjects(bank):
+    return list(bank.get("subjects", {}).keys()) if isinstance(bank, dict) else []
+
+
+def get_question_pool(bank, subject, difficulty="All"):
+    questions = bank.get("subjects", {}).get(subject, {}).get("questions", []) if bank else []
+    if difficulty == "All":
+        return list(questions)
+    return [q for q in questions if q.get("difficulty") == difficulty]
