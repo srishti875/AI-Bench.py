@@ -1,7 +1,8 @@
-"""SQLite database for users, profiles and interview results."""
+"""SQLite database for accounts, interview results and personal notes."""
 
 import hashlib
 import hmac
+import json
 import re
 import secrets
 import sqlite3
@@ -10,7 +11,6 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
 DB_FILE = BASE_DIR / "data" / "aibench.db"
-
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{3,30}$")
 MAX_NAME_LENGTH = 80
 
@@ -35,7 +35,6 @@ def init_database():
                 level TEXT NOT NULL DEFAULT 'Student / Fresher',
                 created_at TEXT NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -44,20 +43,27 @@ def init_database():
                 difficulty TEXT NOT NULL,
                 score REAL NOT NULL,
                 questions INTEGER NOT NULL,
+                transcript TEXT NOT NULL DEFAULT '[]',
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             """
         )
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(results)").fetchall()}
+        if "transcript" not in columns:
+            connection.execute("ALTER TABLE results ADD COLUMN transcript TEXT NOT NULL DEFAULT '[]'")
 
 
 def _hash_password(password, salt=None):
     salt = salt or secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt.encode("utf-8"),
-        120_000,
-    )
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000)
     return f"pbkdf2_sha256$120000${salt}${digest.hex()}"
 
 
@@ -66,12 +72,7 @@ def _check_password(password, stored_hash):
         algorithm, iterations, salt, expected = stored_hash.split("$", 3)
         if algorithm != "pbkdf2_sha256":
             return False
-        digest = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            salt.encode("utf-8"),
-            int(iterations),
-        )
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), int(iterations))
         return hmac.compare_digest(digest.hex(), expected)
     except (ValueError, TypeError):
         return False
@@ -80,7 +81,6 @@ def _check_password(password, stored_hash):
 def create_user(username, password, name, level):
     username = username.strip()
     name = " ".join(name.strip().split())
-
     if not username or not password or not name:
         return False, "Please fill in all required fields."
     if not USERNAME_RE.fullmatch(username):
@@ -89,22 +89,11 @@ def create_user(username, password, name, level):
         return False, f"Name must be {MAX_NAME_LENGTH} characters or fewer."
     if len(password) < 8:
         return False, "Password must be at least 8 characters."
-
     try:
         with get_connection() as connection:
             connection.execute(
-                """
-                INSERT INTO users
-                    (username, password_hash, name, level, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    username,
-                    _hash_password(password),
-                    name,
-                    level,
-                    datetime.now().isoformat(timespec="seconds"),
-                ),
+                "INSERT INTO users (username, password_hash, name, level, created_at) VALUES (?, ?, ?, ?, ?)",
+                (username, _hash_password(password), name, level, datetime.now().isoformat(timespec="seconds")),
             )
         return True, "Account created. You can log in now."
     except sqlite3.IntegrityError:
@@ -112,24 +101,14 @@ def create_user(username, password, name, level):
 
 
 def authenticate_user(username, password):
-    username = username.strip()
     with get_connection() as connection:
-        user = connection.execute(
-            "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
-            (username,),
-        ).fetchone()
-
-    if user and _check_password(password, user["password_hash"]):
-        return dict(user)
-    return None
+        user = connection.execute("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username.strip(),)).fetchone()
+    return dict(user) if user and _check_password(password, user["password_hash"]) else None
 
 
 def get_user(user_id):
     with get_connection() as connection:
-        user = connection.execute(
-            "SELECT * FROM users WHERE id = ?",
-            (user_id,),
-        ).fetchone()
+        user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
     return dict(user) if user else None
 
 
@@ -139,49 +118,73 @@ def update_user(user_id, name, level):
         return False, "Name cannot be empty."
     if len(name) > MAX_NAME_LENGTH:
         return False, f"Name must be {MAX_NAME_LENGTH} characters or fewer."
-
     with get_connection() as connection:
-        connection.execute(
-            "UPDATE users SET name = ?, level = ? WHERE id = ?",
-            (name, level, user_id),
-        )
+        connection.execute("UPDATE users SET name = ?, level = ? WHERE id = ?", (name, level, user_id))
     return True, "Profile updated."
 
 
-def save_result(user_id, subject, difficulty, score, question_count):
-    score = max(0.0, min(10.0, float(score)))
-    question_count = max(0, int(question_count))
-
+def save_result(user_id, subject, difficulty, score, question_count, transcript=None):
+    payload = json.dumps(transcript or [], ensure_ascii=False)
     with get_connection() as connection:
         connection.execute(
-            """
-            INSERT INTO results
-                (user_id, date, subject, difficulty, score, questions)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                datetime.now().strftime("%Y-%m-%d %H:%M"),
-                subject,
-                difficulty,
-                round(score, 1),
-                question_count,
-            ),
+            "INSERT INTO results (user_id, date, subject, difficulty, score, questions, transcript) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (user_id, datetime.now().strftime("%Y-%m-%d %H:%M"), subject, difficulty, max(0, min(10, float(score))), max(0, int(question_count)), payload),
         )
 
 
 def load_results(user_id):
     with get_connection() as connection:
         rows = connection.execute(
-            """
-            SELECT date, subject, difficulty, score, questions
-            FROM results
-            WHERE user_id = ?
-            ORDER BY id DESC
-            """,
+            "SELECT id, date, subject, difficulty, score, questions, transcript FROM results WHERE user_id = ? ORDER BY id DESC",
             (user_id,),
         ).fetchall()
+    output = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["transcript"] = json.loads(item.get("transcript") or "[]")
+        except json.JSONDecodeError:
+            item["transcript"] = []
+        output.append(item)
+    return output
+
+
+def create_note(user_id, title, content):
+    title = title.strip()
+    content = content.strip()
+    if not title or not content:
+        return False, "Add a title and some note content."
+    with get_connection() as connection:
+        connection.execute(
+            "INSERT INTO notes (user_id, title, content, updated_at) VALUES (?, ?, ?, ?)",
+            (user_id, title, content, datetime.now().strftime("%Y-%m-%d %H:%M")),
+        )
+    return True, "Note saved."
+
+
+def load_notes(user_id):
+    with get_connection() as connection:
+        rows = connection.execute("SELECT id, title, content, updated_at FROM notes WHERE user_id = ? ORDER BY id DESC", (user_id,)).fetchall()
     return [dict(row) for row in rows]
+
+
+def update_note(user_id, note_id, title, content):
+    title = title.strip()
+    content = content.strip()
+    if not title or not content:
+        return False, "Add a title and some note content."
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE notes SET title = ?, content = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (title, content, datetime.now().strftime("%Y-%m-%d %H:%M"), note_id, user_id),
+        )
+    return True, "Note updated."
+
+
+def delete_note(user_id, note_id):
+    with get_connection() as connection:
+        connection.execute("DELETE FROM notes WHERE id = ? AND user_id = ?", (note_id, user_id))
+    return True
 
 
 init_database()
