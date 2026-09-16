@@ -1,7 +1,7 @@
 @import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
 
 :root {
-    --bg: #0b0910;
+    --bg: #201b2c;
     --panel: rgba(24, 18, 31, .72);
     --panel-2: rgba(255,255,255,.045);
     --line: rgba(255,255,255,.09);
@@ -41,7 +41,7 @@ body {
 
 /* Sidebar */
 section[data-testid="stSidebar"] {
-    background:rgba(11,9,16,.92);
+    background:rgba(28, 23, 39, 0.92);
     border-right:1px solid rgba(255,255,255,.07);
 }
 section[data-testid="stSidebar"] > div { padding:1.2rem .95rem; }

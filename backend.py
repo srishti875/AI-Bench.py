@@ -7,15 +7,21 @@ import re
 from pathlib import Path
 
 try:
+    from google.genai import types
+except ImportError:
+    types = None
+
+try:
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).parent / ".env")
+    load_dotenv(Path(__file__).parent / "data" / ".env", override=False)
 except ImportError:
     pass
 
 try:
-    from openai import OpenAI
+    from google import genai
 except ImportError:  # pragma: no cover - handled gracefully in the UI
-    OpenAI = None
+    genai = None
 
 BASE_DIR = Path(__file__).parent
 
@@ -25,7 +31,6 @@ FALLBACK_TOPICS = {
         "How would you approach debugging a program that works locally but fails in production?",
         "What is the purpose of abstraction in software design?",
         "Explain time complexity and give an example of an O(n) operation.",
-        "How would you design a simple feature from requirements to deployment?",
     ],
     "python": [
         "What is the difference between a list, tuple and set in Python?",
@@ -52,14 +57,15 @@ FALLBACK_TOPICS = {
 
 
 def get_ai_client():
-    if OpenAI is None:
+    """Return a configured Gemini client and model name, or None if unavailable."""
+    if genai is None:
         return None
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         return None
-    model = os.getenv("OPENAI_MODEL", "gpt-5.6-luna").strip()
+    model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
     try:
-        return OpenAI(api_key=api_key, timeout=60.0, max_retries=2), model
+        return genai.Client(api_key=api_key), model
     except Exception:
         return None
 
@@ -69,22 +75,21 @@ def ai_available():
 
 
 def ask_ai(prompt, fallback, *, instructions=None):
+    """Call Gemini and return text; use fallback when Gemini is unavailable or fails."""
     client_info = get_ai_client()
     if client_info is None:
         return fallback
 
     client, model = client_info
+    full_prompt = prompt
+    if instructions:
+        full_prompt = f"System instructions:\n{instructions}\n\nUser task:\n{prompt}"
     try:
-        response = client.responses.create(
+        response = client.models.generate_content(
             model=model,
-            instructions=instructions or (
-                "You are AI-bench, a professional interview coach. "
-                "Be accurate, practical, concise and encouraging. "
-                "Never invent facts when a technical detail matters."
-            ),
-            input=prompt,
+            contents=full_prompt,
         )
-        text = getattr(response, "output_text", "") or ""
+        text = getattr(response, "text", "") or ""
         return text.strip() or fallback
     except Exception:
         return fallback
@@ -328,3 +333,54 @@ def get_question_pool(bank, subject, difficulty="All"):
     if difficulty == "All":
         return list(questions)
     return [q for q in questions if q.get("difficulty") == difficulty]
+
+def coach_with_file(message, file_bytes, mime_type, level="Student / Fresher"):
+    """Ask Gemini to answer using an uploaded PDF or image as context."""
+
+    fallback = (
+        "I couldn't read the uploaded file. Please try uploading it again "
+        "or ask your question without the file."
+    )
+
+    client_info = get_ai_client()
+    if client_info is None:
+        return fallback
+
+    client, model = client_info
+
+    prompt = f"""
+You are AI-bench Coach helping a {level} student.
+
+The student uploaded a study document/image and asked:
+
+{message}
+
+Use ONLY the uploaded material as the primary source.
+Read the document/image carefully.
+Answer the student's question clearly and accurately.
+If the material does not contain the answer, say that it is not available
+in the uploaded material instead of inventing information.
+
+For explanations:
+- explain difficult concepts simply
+- give examples when useful
+- preserve important terminology from the material
+- structure the answer with headings or bullet points when appropriate
+"""
+
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=[
+                types.Part.from_bytes(
+                    data=file_bytes,
+                    mime_type=mime_type
+                ),
+                prompt,
+            ],
+        )
+
+        return (getattr(response, "text", "") or "").strip() or fallback
+
+    except Exception as exc:
+        return f"Unable to process the uploaded file: {exc}"

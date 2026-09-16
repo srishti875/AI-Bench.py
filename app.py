@@ -2,6 +2,11 @@
 
 import html
 import re
+import time
+import io
+from pathlib import Path
+
+from streamlit_autorefresh import st_autorefresh
 
 import streamlit as st
 
@@ -14,6 +19,7 @@ from backend import (
     generate_next_question,
     score_from_feedback,
     suggest_questions,
+    coach_with_file,
 )
 from database import (
     authenticate_user,
@@ -50,6 +56,7 @@ def init_state():
         "current_answer": "",
         "interview_complete": False,
         "result_saved": False,
+        "question_started_at": None,
         "suggestions": [],
         "coach_chat": [],
     }
@@ -72,6 +79,7 @@ def reset_interview():
         "current_answer": "",
         "interview_complete": False,
         "result_saved": False,
+        "question_started_at": None,
     }.items():
         st.session_state[key] = value
 
@@ -250,6 +258,7 @@ elif st.session_state.page == "Interview":
                 st.session_state.current_feedback = ""
                 st.session_state.interview_complete = False
                 st.session_state.result_saved = False
+                st.session_state.question_started_at = time.time()
                 st.rerun()
     elif st.session_state.interview_complete:
         score = calculate_session_score(st.session_state.interview_transcript)
@@ -264,13 +273,67 @@ elif st.session_state.page == "Interview":
         questions = st.session_state.interview_questions
         question = questions[idx]
         total = len(questions)
+
+        # Five-minute countdown for each interview question.
+        if st.session_state.question_started_at is None:
+            st.session_state.question_started_at = time.time()
+
+        st_autorefresh(interval=1000, key=f"question_timer_{idx}")
+        elapsed = time.time() - st.session_state.question_started_at
+        remaining = max(0, 300 - int(elapsed))
+        minutes, seconds = divmod(remaining, 60)
+
+        st.markdown(
+            f'<div class="question-timer"><span>TIME REMAINING</span><strong style="margin-left: 18px;">{minutes:02d}:{seconds:02d}</strong></div>',
+            unsafe_allow_html=True,
+        )
+
+        # Time-out: record an unanswered question and move on without calling Gemini.
+        if remaining <= 0 and not st.session_state.current_feedback:
+            timeout_feedback = "Time expired. No answer was submitted for this question."
+            st.session_state.interview_transcript.append({
+                "question": question,
+                "answer": "[Time expired]",
+                "feedback": timeout_feedback,
+                "score": 0,
+            })
+
+            if idx + 1 < total:
+                with st.spinner("Time is up. Preparing the next question..."):
+                    next_question = generate_next_question(
+                        st.session_state.interview_topic,
+                        st.session_state.interview_level,
+                        st.session_state.interview_difficulty,
+                        st.session_state.interview_transcript,
+                        idx + 2,
+                    )
+                st.session_state.interview_questions[idx + 1] = next_question
+                st.session_state.question_index += 1
+                st.session_state.question_started_at = time.time()
+                st.session_state.current_feedback = ""
+                st.rerun()
+            else:
+                final_score = calculate_session_score(st.session_state.interview_transcript)
+                save_result(
+                    st.session_state.user_id,
+                    st.session_state.interview_topic,
+                    st.session_state.interview_difficulty,
+                    final_score,
+                    total,
+                    st.session_state.interview_transcript,
+                )
+                st.session_state.interview_complete = True
+                st.session_state.result_saved = True
+                st.session_state.question_started_at = None
+                st.rerun()
+
         st.progress(idx / total if total else 0)
         st.markdown(f'<div class="interview-meta"><span>QUESTION {idx + 1} OF {total}</span><span>{safe(st.session_state.interview_topic)}</span><span>{safe(st.session_state.interview_difficulty)}</span></div>', unsafe_allow_html=True)
         st.markdown(f'<div class="question-panel glass reveal"><span class="tag">AI INTERVIEWER</span><h2>{safe(question)}</h2></div>', unsafe_allow_html=True)
 
         if not st.session_state.current_feedback:
             with st.form(f"answer_form_{idx}"):
-                answer = st.text_area("Your answer", height=190, placeholder="Explain your answer as if you were speaking to an interviewer...")
+                answer = st.text_area("Your answer", height=190, placeholder="Explain your answer as if you were speaking to an interviewer...", key=f"answer_{idx}")
                 submit = st.form_submit_button("Submit answer", type="primary", use_container_width=True)
             if submit:
                 if not answer.strip():
@@ -298,6 +361,7 @@ elif st.session_state.page == "Interview":
                 if st.button("Next question →", type="primary", use_container_width=True):
                     st.session_state.question_index += 1
                     st.session_state.current_feedback = ""
+                    st.session_state.question_started_at = time.time()
                     st.rerun()
             else:
                 st.success("Interview complete. Your result has been saved.")
@@ -344,49 +408,124 @@ elif st.session_state.page == "Results":
                     st.markdown(f"**Q{q_index}. {item.get('question', '')}**")
                     st.markdown(f"> {item.get('answer', '')}")
                     st.markdown(item.get("feedback", "No feedback saved."))
-                    st.divider()
-
-# NOTES
+         # NOTES
 elif st.session_state.page == "Notes":
     page_header("PRIVATE NOTES", "Build your own interview notebook.", "Save definitions, mistakes, reminders, topics to revise and anything else you want beside your AI practice.")
+
+    section_title("Add a note", "Optional attachment included")
     with st.form("new_note", clear_on_submit=True):
         title = st.text_input("Note title", placeholder="e.g. DBMS — things I keep forgetting")
         content = st.text_area("Note", height=150, placeholder="Write your study note here...")
+        note_file = st.file_uploader(
+            "Attach a PDF or image (optional)",
+            type=["pdf", "png", "jpg", "jpeg", "webp"],
+            key="note_attachment",
+        )
         save = st.form_submit_button("Save note", type="primary", use_container_width=True)
+
     if save:
-        ok, message = create_note(st.session_state.user_id, title, content)
+        ok, message = create_note(st.session_state.user_id, title, content, note_file)
         if ok:
             st.success(message)
             st.rerun()
         else:
             st.error(message)
+
     section_title("Your notebook", f"{len(notes)} saved notes")
     if not notes:
         st.info("No notes yet. Add your first one above.")
-    for note in notes:
-        with st.expander(f"{note['title']}  ·  {note['updated_at']}"):
-            st.markdown(note["content"])
-            if st.button("Delete note", key=f"delete_note_{note['id']}"):
-                delete_note(st.session_state.user_id, note["id"])
-                st.rerun()
+    else:
+        for note in notes:
+            with st.expander(f"{note['title']}  ·  {note['updated_at']}"):
+                st.markdown(note["content"])
+                attachment_name = note.get("attachment_name") or ""
+                attachment_path = note.get("attachment_path") or ""
+                if attachment_name and attachment_path and Path(attachment_path).exists():
+                    st.caption(f"Attachment: {attachment_name}")
+                    with open(attachment_path, "rb") as file:
+                        st.download_button(
+                            "Open attachment",
+                            data=file.read(),
+                            file_name=attachment_name,
+                            key=f"download_note_file_{note['id']}",
+                        )
+                if st.button("Delete note", key=f"delete_note_{note['id']}"):
+                    delete_note(st.session_state.user_id, note["id"])
+                    st.rerun()
 
 # AI COACH
 elif st.session_state.page == "AI Coach":
-    page_header("AI COACH", "Ask. Learn. Improve.", "A conversational space for technical explanations, preparation plans, answer reviews and interview confidence.")
+    page_header("AI COACH", "Ask. Learn. Improve.", "A conversational space for technical explanations, preparation plans, answer reviews and questions about your uploaded study material.")
+
+    uploaded_file = st.file_uploader(
+        "Upload study material (optional)",
+        type=["pdf", "txt", "jpg", "jpeg", "png", "webp"],
+        key="coach_file",
+        help="PDF, TXT and common image formats are supported.",
+    )
+
+    if uploaded_file is not None:
+        st.session_state.coach_file_bytes = uploaded_file.getvalue()
+        st.session_state.coach_file_name = uploaded_file.name
+        st.session_state.coach_file_type = uploaded_file.type or "application/octet-stream"
+        st.success(f"Attached: {uploaded_file.name}")
+
+    if st.session_state.get("coach_file_name"):
+        st.caption(f"Using: {st.session_state.coach_file_name}")
+
     if not st.session_state.coach_chat:
-        st.markdown('<div class="coach-intro glass"><span class="tag">TRY ASKING</span><div class="coach-prompts"><span>Explain normalization simply</span><span>How do I answer “tell me about yourself”?</span><span>Make me a 7-day Python plan</span><span>What am I weak at?</span></div></div>', unsafe_allow_html=True)
-    for message in st.session_state.coach_chat:
+        st.markdown(
+            '<div class="coach-intro glass"><span class="tag">TRY ASKING</span>'
+            '<div class="coach-prompts">'
+            '<span>Explain this document</span>'
+            '<span>Summarize the important topics</span>'
+            '<span>Quiz me from this material</span>'
+            '<span>Explain this concept simply</span>'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    for i, message in enumerate(st.session_state.coach_chat):
         role = "You" if message["role"] == "user" else "AI-bench"
-        st.markdown(f'<div class="chat-bubble {message["role"]}"><span>{role}</span><p>{safe(message["content"])}</p></div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="chat-bubble {message["role"]}">'
+            f'<span>{role}</span><p>{safe(message["content"])}</p></div>',
+            unsafe_allow_html=True,
+        )
+        if message["role"] == "assistant":
+            if st.button("Save to Notes", key=f"save_ai_note_{i}"):
+                ok, msg = create_note(st.session_state.user_id, "AI Coach Answer", message["content"])
+                if ok:
+                    st.success("AI answer saved to Notes.")
+                else:
+                    st.error(msg)
+
     with st.form("coach_form", clear_on_submit=True):
-        message = st.text_area("Message", height=100, placeholder="Ask anything about your interview preparation...")
+        message = st.text_area(
+            "Message",
+            height=100,
+            placeholder="Ask AI-bench about your uploaded material...",
+        )
         send = st.form_submit_button("Ask AI-bench", type="primary", use_container_width=True)
-    if send and message.strip():
-        st.session_state.coach_chat.append({"role": "user", "content": message.strip()})
-        with st.spinner("Thinking..."):
-            reply = freeform_coach(message.strip(), user["level"])
-        st.session_state.coach_chat.append({"role": "assistant", "content": reply})
-        st.rerun()
+
+    if send:
+        if not message.strip():
+            st.warning("Write a message first.")
+        else:
+            message = message.strip()
+            st.session_state.coach_chat.append({"role": "user", "content": message})
+            with st.spinner("Reading and thinking..."):
+                if st.session_state.get("coach_file_bytes"):
+                    reply = coach_with_file(
+                        message,
+                        st.session_state.coach_file_bytes,
+                        st.session_state.get("coach_file_type", "application/octet-stream"),
+                        user["level"],
+                    )
+                else:
+                    reply = freeform_coach(message, user["level"])
+            st.session_state.coach_chat.append({"role": "assistant", "content": reply})
+            st.rerun()
 
 # PROFILE
 elif st.session_state.page == "Profile":
@@ -416,3 +555,5 @@ elif st.session_state.page == "About":
         glass_card("Question lab", "Generate a preparation checklist for unfamiliar roles, technologies and viva topics.", "PREPARE")
         glass_card("Private notes", "Keep personal revision notes separate from AI feedback and interview history.", "ORGANISE")
     st.markdown('<div class="about-footer glass"><strong>AI-bench</strong><span>AI-powered interview preparation for students.</span></div>', unsafe_allow_html=True)
+    st.markdown('<div class="about-footer glass"><strong>Developed By Team: THE STAR ARCHITECT</strong><span>srishti, prachi</span></div>', unsafe_allow_html=True)
+

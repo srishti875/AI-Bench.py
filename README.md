@@ -3,13 +3,7 @@
 AI-bench is a polished subject-based AI mock interview and viva practice platform for students.
 
 ## Core subjects
-- Arrays
-- Linked List
-- Stack
-- Queue
-- DBMS
-- OS
-
+According User's Demand
 ## File roles
 - `app.py` — structure/orchestration, navigation, session state and page flows.
 - `frontend.py` — reusable Streamlit UI helpers.

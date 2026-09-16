@@ -11,6 +11,8 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
 DB_FILE = BASE_DIR / "data" / "aibench.db"
+ATTACHMENTS_DIR = BASE_DIR / "data" / "note_attachments"
+ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{3,30}$")
 MAX_NAME_LENGTH = 80
 
@@ -24,6 +26,7 @@ def get_connection():
 
 
 def init_database():
+    """Create the database schema first, then safely migrate older databases."""
     with get_connection() as connection:
         connection.executescript(
             """
@@ -52,12 +55,21 @@ def init_database():
                 title TEXT NOT NULL,
                 content TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                attachment_name TEXT DEFAULT '',
+                attachment_path TEXT DEFAULT '',
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             """
         )
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(results)").fetchall()}
-        if "transcript" not in columns:
+
+        note_columns = {row[1] for row in connection.execute("PRAGMA table_info(notes)").fetchall()}
+        if "attachment_name" not in note_columns:
+            connection.execute("ALTER TABLE notes ADD COLUMN attachment_name TEXT DEFAULT ''")
+        if "attachment_path" not in note_columns:
+            connection.execute("ALTER TABLE notes ADD COLUMN attachment_path TEXT DEFAULT ''")
+
+        result_columns = {row[1] for row in connection.execute("PRAGMA table_info(results)").fetchall()}
+        if "transcript" not in result_columns:
             connection.execute("ALTER TABLE results ADD COLUMN transcript TEXT NOT NULL DEFAULT '[]'")
 
 
@@ -149,22 +161,50 @@ def load_results(user_id):
     return output
 
 
-def create_note(user_id, title, content):
+def create_note(user_id, title, content, attachment=None):
     title = title.strip()
     content = content.strip()
+
     if not title or not content:
         return False, "Add a title and some note content."
+
+    attachment_name = ""
+    attachment_path = ""
+
+    if attachment is not None:
+        attachment_name = attachment.name
+        safe_name = Path(attachment_name).name
+        attachment_path = str(ATTACHMENTS_DIR / safe_name)
+
+        with open(attachment_path, "wb") as file:
+            file.write(attachment.getvalue())
+
     with get_connection() as connection:
         connection.execute(
-            "INSERT INTO notes (user_id, title, content, updated_at) VALUES (?, ?, ?, ?)",
-            (user_id, title, content, datetime.now().strftime("%Y-%m-%d %H:%M")),
+            """
+            INSERT INTO notes
+            (user_id, title, content, updated_at, attachment_name, attachment_path)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                title,
+                content,
+                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                attachment_name,
+                attachment_path,
+            ),
         )
+
     return True, "Note saved."
 
-
+ 
 def load_notes(user_id):
     with get_connection() as connection:
-        rows = connection.execute("SELECT id, title, content, updated_at FROM notes WHERE user_id = ? ORDER BY id DESC", (user_id,)).fetchall()
+        rows = connection.execute(
+            "SELECT id, title, content, updated_at, attachment_name, attachment_path FROM notes WHERE user_id = ? ORDER BY id DESC",
+            (user_id,)
+            ).fetchall()
     return [dict(row) for row in rows]
 
 
