@@ -1,8 +1,5 @@
 """AI-bench: an AI-first interview coach for students."""
-<<<<<<< HEAD
-=======
 
->>>>>>> 5a9456e292e044a09d053ab7d183f90f9a65755a
 import html
 import re
 import time
