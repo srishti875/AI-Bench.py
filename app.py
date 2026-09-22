@@ -4,6 +4,7 @@ import re
 import time
 import io
 from pathlib import Path
+import streamlit.components.v1 as components
 
 from streamlit_autorefresh import st_autorefresh
 
@@ -13,6 +14,7 @@ from backend import (
     ai_available,
     calculate_session_score,
     evaluate_answer,
+    transcribe_audio,
     freeform_coach,
     generate_interview,
     generate_next_question,
@@ -42,7 +44,7 @@ DIFFICULTIES = ["Adaptive", "Easy", "Medium", "Hard"]
 
 
 def init_state():
-    defaults = {
+ defaults = {
         "page": "Home",
         "user_id": None,
         "interview_topic": "",
@@ -56,11 +58,13 @@ def init_state():
         "interview_complete": False,
         "result_saved": False,
         "question_started_at": None,
+        "spoken_question_index": None,
+        "voice_transcript": "",
         "suggestions": [],
         "coach_chat": [],
     }
-    for key, value in defaults.items():
-        st.session_state.setdefault(key, value)
+ for key, value in defaults.items():
+              st.session_state.setdefault(key, value) 
 
 
 def go_to(page):
@@ -79,6 +83,8 @@ def reset_interview():
         "interview_complete": False,
         "result_saved": False,
         "question_started_at": None,
+        "spoken_question_index": None,
+        "voice_transcript": "",
     }.items():
         st.session_state[key] = value
 
@@ -287,6 +293,28 @@ elif st.session_state.page == "Interview":
             unsafe_allow_html=True,
         )
 
+        # Speak each new question once.
+        if st.session_state.get("spoken_question_index") != idx:
+            components.html(
+                f"""<script>
+                const text = {question!r};
+
+                if ('speechSynthesis' in window) {{
+                    window.speechSynthesis.cancel();
+
+                    const utterance = new SpeechSynthesisUtterance(text);
+                    utterance.rate = 0.92;
+                    utterance.pitch = 1.0;
+                    utterance.lang = 'en-US';
+
+                    window.speechSynthesis.speak(utterance);
+                }}
+                </script>""",
+                height=0,
+            )
+
+            st.session_state.spoken_question_index = idx
+
         # Time-out: record an unanswered question and move on without calling Gemini.
         if remaining <= 0 and not st.session_state.current_feedback:
             timeout_feedback = "Time expired. No answer was submitted for this question."
@@ -325,37 +353,143 @@ elif st.session_state.page == "Interview":
                 st.session_state.result_saved = True
                 st.session_state.question_started_at = None
                 st.rerun()
+            idx = st.session_state.question_index
+            question = st.session_state.interview_questions[idx]
+            total = len(st.session_state.interview_questions)
 
-        st.progress(idx / total if total else 0)
-        st.markdown(f'<div class="interview-meta"><span>QUESTION {idx + 1} OF {total}</span><span>{safe(st.session_state.interview_topic)}</span><span>{safe(st.session_state.interview_difficulty)}</span></div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="question-panel glass reveal"><span class="tag">AI INTERVIEWER</span><h2>{safe(question)}</h2></div>', unsafe_allow_html=True)
+            st.progress(idx / total if total else 0)
+            
+            st.markdown(
+                f'<div class="interview-meta"><span>QUESTION {idx + 1} OF {total}</span>'
+                f'<span>{safe(st.session_state.interview_topic)}</span>'
+                f'<span>{safe(st.session_state.interview_difficulty)}</span></div>',
+                unsafe_allow_html=True,
+            )
 
-        if not st.session_state.current_feedback:
-            with st.form(f"answer_form_{idx}"):
-                answer = st.text_area("Your answer", height=190, placeholder="Explain your answer as if you were speaking to an interviewer...", key=f"answer_{idx}")
-                submit = st.form_submit_button("Submit answer", type="primary", use_container_width=True)
-            if submit:
-                if not answer.strip():
-                    st.warning("Write an answer before submitting.")
-                else:
-                    with st.spinner("AI is reviewing your answer..."):
-                        feedback = evaluate_answer(st.session_state.interview_topic, question, answer.strip(), st.session_state.interview_level)
-                    score = score_from_feedback(feedback, answer)
-                    st.session_state.interview_transcript.append({"question": question, "answer": answer.strip(), "feedback": feedback, "score": score})
-                    st.session_state.current_feedback = feedback
-                    if idx + 1 < total:
-                        with st.spinner("Adapting the next question..."):
-                            next_question = generate_next_question(st.session_state.interview_topic, st.session_state.interview_level, st.session_state.interview_difficulty, st.session_state.interview_transcript, idx + 2)
-                        st.session_state.interview_questions[idx + 1] = next_question
+            st.markdown(
+                f'<div class="question-panel glass reveal"><span class="tag">'
+                f'AI INTERVIEWER</span><h2>{safe(question)}</h2></div>',
+                unsafe_allow_html=True,
+            )
+
+            if not st.session_state.current_feedback:
+                st.markdown("### Your answer")
+
+                text_col, voice_col = st.columns(2)
+
+                with text_col:
+                    st.markdown("**Type your answer**")
+                    typed_answer = st.text_area(
+                        "Text answer",
+                        height=150,
+                        placeholder="Type your answer here...",
+                        key=f"answer_{idx}",
+                        label_visibility="collapsed",
+                    )
+
+                    submit_text = st.button(
+                        "Submit text answer",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"submit_text_{idx}",
+                    )
+
+                with voice_col:
+                    st.markdown("**Speak your answer**")
+                    audio_answer = st.audio_input(
+                        "Record your answer",
+                        key=f"voice_{idx}",
+                        # label_visibility="collapsed",
+                    )
+
+                    transcribe_voice = st.button(
+                        "Use this recording",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"transcribe_voice_{idx}",
+                    )
+
+                if transcribe_voice:
+                    if audio_answer is None:
+                        st.warning("Record your answer first.")
                     else:
+                        with st.spinner("Transcribing your answer..."):
+                            voice_text = transcribe_audio(
+                                audio_answer.getvalue(),
+                                audio_answer.type or "audio/wav",
+                                st.session_state.interview_level,
+                            )
+
+                        if voice_text:
+                            st.session_state.voice_transcript = voice_text
+                            st.rerun()
+                        else:
+                            st.error("I couldn't transcribe that recording.")
+
+                if st.session_state.get("voice_transcript"):
+                    st.markdown("**Voice transcript — review or edit:**")
+
+                    voice_answer = st.text_area(
+                        "Voice transcript",
+                        value=st.session_state.voice_transcript,
+                        height=150,
+                        key=f"voice_answer_{idx}",
+                        label_visibility="collapsed",
+                    )
+
+                    submit_voice = st.button(
+                        "Submit voice answer",
+                        type="primary",
+                        use_container_width=True,
+                        key=f"submit_voice_{idx}",
+                    )
+                else:
+                    voice_answer = ""
+                    submit_voice = False
+
+                submit = submit_text or submit_voice
+
+                if submit:
+                    answer = (voice_answer if submit_voice else typed_answer).strip()
+
+                    if not answer.strip():
+                        st.warning("Write an answer before submitting.")
+                    else:
+                        with st.spinner("AI is reviewing your answer..."):
+                            feedback = evaluate_answer(st.session_state.interview_topic, question, answer.strip(), st.session_state.interview_level)
+                        score = score_from_feedback(feedback, answer)
+                        st.session_state.interview_transcript.append({"question": question, "answer": answer.strip(), "feedback": feedback, "score": score})
+                        st.session_state.current_feedback = feedback
+                        if idx + 1 < total:
+                            with st.spinner("Adapting the next question..."):
+                                next_question = generate_next_question(st.session_state.interview_topic, st.session_state.interview_level, st.session_state.interview_difficulty, st.session_state.interview_transcript, idx + 2)
+                            st.session_state.interview_questions[idx + 1] = next_question
+                            if idx + 1 < total:
+                             with st.spinner("Adapting the next question..."):
+                                                          next_question = generate_next_question(
+                                                              st.session_state.interview_topic,
+                                     st.session_state.interview_level,
+                                     st.session_state.interview_difficulty,
+                                     st.session_state.interview_transcript,
+                                     idx + 2,
+                                 )
+                        st.session_state.interview_questions[idx + 1] = next_question
+
+                                 # Reset voice features for the new question
+                        st.session_state.spoken_question_index = None
+                        st.session_state.voice_transcript = ""
+                        st.session_state.question_started_at = time.time()
+                else:
                         final_score = calculate_session_score(st.session_state.interview_transcript)
                         save_result(st.session_state.user_id, st.session_state.interview_topic, st.session_state.interview_difficulty, final_score, total, st.session_state.interview_transcript)
                         st.session_state.interview_complete = True
                         st.session_state.result_saved = True
-                    st.rerun()
-        else:
-            st.markdown('<div class="answer-label">AI REVIEW</div>', unsafe_allow_html=True)
-            feedback_card(st.session_state.current_feedback)
+                        st.rerun()
+
+            if st.session_state.current_feedback:
+                st.markdown('<div class="answer-label">AI REVIEW</div>', unsafe_allow_html=True)
+                feedback_card(st.session_state.current_feedback)
+
             if idx + 1 < total:
                 if st.button("Next question →", type="primary", use_container_width=True):
                     st.session_state.question_index += 1

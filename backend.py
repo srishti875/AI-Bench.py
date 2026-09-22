@@ -384,3 +384,56 @@ For explanations:
 
     except Exception as exc:
         return f"Unable to process the uploaded file: {exc}"
+
+def transcribe_audio(audio_bytes, mime_type="audio/wav", level="Student / Fresher"):
+    """Convert a spoken interview answer into text using Gemini."""
+
+    if not ai_available():
+        return ""
+
+    prompt = f"""
+You are transcribing a student's answer in a mock interview.
+
+Return ONLY the spoken words as clean text.
+
+Do not:
+- evaluate the answer
+- summarize it
+- correct it
+- add information
+
+Preserve technical terms as accurately as possible.
+
+The student's level is {level}.
+
+If a word is unclear, make the most likely transcription
+from the audio context.
+"""
+
+    client_info = get_ai_client()
+
+    if client_info is None:
+        return ""
+
+    client, model = client_info
+
+    try:
+        contents = [
+            {
+                "inline_data": {
+                    "mime_type": mime_type,
+                    "data": audio_bytes,
+                }
+            },
+            prompt,
+        ]
+
+        response = client.models.generate_content(
+            model=model,
+            contents=contents,
+        )
+
+        return (getattr(response, "text", "") or "").strip()
+
+    except Exception:
+        return ""
