@@ -1,4 +1,4 @@
-"""SQLite database for accounts, interview results and personal notes."""
+"""SQLite database for accounts, interview results, personal notes and career guidance."""
 
 import hashlib
 import hmac
@@ -38,6 +38,7 @@ def init_database():
                 level TEXT NOT NULL DEFAULT 'Student / Fresher',
                 created_at TEXT NOT NULL
             );
+
             CREATE TABLE IF NOT EXISTS results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -49,6 +50,7 @@ def init_database():
                 transcript TEXT NOT NULL DEFAULT '[]',
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
+
             CREATE TABLE IF NOT EXISTS notes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -59,23 +61,52 @@ def init_database():
                 attachment_path TEXT DEFAULT '',
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS career_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL UNIQUE,
+                education TEXT NOT NULL DEFAULT '',
+                interests TEXT NOT NULL DEFAULT '',
+                skills TEXT NOT NULL DEFAULT '',
+                strengths TEXT NOT NULL DEFAULT '',
+                work_preferences TEXT NOT NULL DEFAULT '',
+                goals TEXT NOT NULL DEFAULT '',
+                recommendations TEXT NOT NULL DEFAULT '[]',
+                skill_gap TEXT NOT NULL DEFAULT '[]',
+                roadmap TEXT NOT NULL DEFAULT '[]',
+                selected_path TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
             """
         )
 
-        note_columns = {row[1] for row in connection.execute("PRAGMA table_info(notes)").fetchall()}
+        note_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(notes)").fetchall()
+        }
         if "attachment_name" not in note_columns:
-            connection.execute("ALTER TABLE notes ADD COLUMN attachment_name TEXT DEFAULT ''")
+            connection.execute(
+                "ALTER TABLE notes ADD COLUMN attachment_name TEXT DEFAULT ''"
+            )
         if "attachment_path" not in note_columns:
-            connection.execute("ALTER TABLE notes ADD COLUMN attachment_path TEXT DEFAULT ''")
+            connection.execute(
+                "ALTER TABLE notes ADD COLUMN attachment_path TEXT DEFAULT ''"
+            )
 
-        result_columns = {row[1] for row in connection.execute("PRAGMA table_info(results)").fetchall()}
+        result_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(results)").fetchall()
+        }
         if "transcript" not in result_columns:
-            connection.execute("ALTER TABLE results ADD COLUMN transcript TEXT NOT NULL DEFAULT '[]'")
+            connection.execute(
+                "ALTER TABLE results ADD COLUMN transcript TEXT NOT NULL DEFAULT '[]'"
+            )
 
 
 def _hash_password(password, salt=None):
     salt = salt or secrets.token_hex(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000
+    )
     return f"pbkdf2_sha256$120000${salt}${digest.hex()}"
 
 
@@ -84,7 +115,12 @@ def _check_password(password, stored_hash):
         algorithm, iterations, salt, expected = stored_hash.split("$", 3)
         if algorithm != "pbkdf2_sha256":
             return False
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), int(iterations))
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            int(iterations),
+        )
         return hmac.compare_digest(digest.hex(), expected)
     except (ValueError, TypeError):
         return False
@@ -105,7 +141,13 @@ def create_user(username, password, name, level):
         with get_connection() as connection:
             connection.execute(
                 "INSERT INTO users (username, password_hash, name, level, created_at) VALUES (?, ?, ?, ?, ?)",
-                (username, _hash_password(password), name, level, datetime.now().isoformat(timespec="seconds")),
+                (
+                    username,
+                    _hash_password(password),
+                    name,
+                    level,
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
             )
         return True, "Account created. You can log in now."
     except sqlite3.IntegrityError:
@@ -114,13 +156,18 @@ def create_user(username, password, name, level):
 
 def authenticate_user(username, password):
     with get_connection() as connection:
-        user = connection.execute("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username.strip(),)).fetchone()
+        user = connection.execute(
+            "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
+            (username.strip(),),
+        ).fetchone()
     return dict(user) if user and _check_password(password, user["password_hash"]) else None
 
 
 def get_user(user_id):
     with get_connection() as connection:
-        user = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        user = connection.execute(
+            "SELECT * FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
     return dict(user) if user else None
 
 
@@ -131,7 +178,10 @@ def update_user(user_id, name, level):
     if len(name) > MAX_NAME_LENGTH:
         return False, f"Name must be {MAX_NAME_LENGTH} characters or fewer."
     with get_connection() as connection:
-        connection.execute("UPDATE users SET name = ?, level = ? WHERE id = ?", (name, level, user_id))
+        connection.execute(
+            "UPDATE users SET name = ?, level = ? WHERE id = ?",
+            (name, level, user_id),
+        )
     return True, "Profile updated."
 
 
@@ -139,17 +189,35 @@ def save_result(user_id, subject, difficulty, score, question_count, transcript=
     payload = json.dumps(transcript or [], ensure_ascii=False)
     with get_connection() as connection:
         connection.execute(
-            "INSERT INTO results (user_id, date, subject, difficulty, score, questions, transcript) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (user_id, datetime.now().strftime("%Y-%m-%d %H:%M"), subject, difficulty, max(0, min(10, float(score))), max(0, int(question_count)), payload),
+            """
+            INSERT INTO results
+            (user_id, date, subject, difficulty, score, questions, transcript)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                subject,
+                difficulty,
+                max(0, min(10, float(score))),
+                max(0, int(question_count)),
+                payload,
+            ),
         )
 
 
 def load_results(user_id):
     with get_connection() as connection:
         rows = connection.execute(
-            "SELECT id, date, subject, difficulty, score, questions, transcript FROM results WHERE user_id = ? ORDER BY id DESC",
+            """
+            SELECT id, date, subject, difficulty, score, questions, transcript
+            FROM results
+            WHERE user_id = ?
+            ORDER BY id DESC
+            """,
             (user_id,),
         ).fetchall()
+
     output = []
     for row in rows:
         item = dict(row)
@@ -198,13 +266,18 @@ def create_note(user_id, title, content, attachment=None):
 
     return True, "Note saved."
 
- 
+
 def load_notes(user_id):
     with get_connection() as connection:
         rows = connection.execute(
-            "SELECT id, title, content, updated_at, attachment_name, attachment_path FROM notes WHERE user_id = ? ORDER BY id DESC",
-            (user_id,)
-            ).fetchall()
+            """
+            SELECT id, title, content, updated_at, attachment_name, attachment_path
+            FROM notes
+            WHERE user_id = ?
+            ORDER BY id DESC
+            """,
+            (user_id,),
+        ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -215,15 +288,123 @@ def update_note(user_id, note_id, title, content):
         return False, "Add a title and some note content."
     with get_connection() as connection:
         connection.execute(
-            "UPDATE notes SET title = ?, content = ?, updated_at = ? WHERE id = ? AND user_id = ?",
-            (title, content, datetime.now().strftime("%Y-%m-%d %H:%M"), note_id, user_id),
+            """
+            UPDATE notes
+            SET title = ?, content = ?, updated_at = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (
+                title,
+                content,
+                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                note_id,
+                user_id,
+            ),
         )
     return True, "Note updated."
 
 
 def delete_note(user_id, note_id):
     with get_connection() as connection:
-        connection.execute("DELETE FROM notes WHERE id = ? AND user_id = ?", (note_id, user_id))
+        connection.execute(
+            "DELETE FROM notes WHERE id = ? AND user_id = ?",
+            (note_id, user_id),
+        )
+    return True
+
+
+def get_career_profile(user_id):
+    """Load a user's saved career guidance profile."""
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM career_profiles WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    item = dict(row)
+    for field in ("recommendations", "skill_gap", "roadmap"):
+        try:
+            item[field] = json.loads(item.get(field) or "[]")
+        except json.JSONDecodeError:
+            item[field] = []
+    return item
+
+
+def save_career_profile(
+    user_id,
+    education="",
+    interests="",
+    skills="",
+    strengths="",
+    work_preferences="",
+    goals="",
+    recommendations=None,
+    skill_gap=None,
+    roadmap=None,
+    selected_path="",
+):
+    """Create or update the user's persistent career guidance profile."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    with get_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO career_profiles
+            (
+                user_id, education, interests, skills, strengths,
+                work_preferences, goals, recommendations, skill_gap,
+                roadmap, selected_path, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                education = excluded.education,
+                interests = excluded.interests,
+                skills = excluded.skills,
+                strengths = excluded.strengths,
+                work_preferences = excluded.work_preferences,
+                goals = excluded.goals,
+                recommendations = excluded.recommendations,
+                skill_gap = excluded.skill_gap,
+                roadmap = excluded.roadmap,
+                selected_path = excluded.selected_path,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                education.strip(),
+                interests.strip(),
+                skills.strip(),
+                strengths.strip(),
+                work_preferences.strip(),
+                goals.strip(),
+                json.dumps(recommendations or [], ensure_ascii=False),
+                json.dumps(skill_gap or [], ensure_ascii=False),
+                json.dumps(roadmap or [], ensure_ascii=False),
+                selected_path.strip(),
+                now,
+            ),
+        )
+    return True
+
+
+def update_career_selection(user_id, selected_path):
+    """Persist only the currently selected career path."""
+    with get_connection() as connection:
+        connection.execute(
+            """
+            UPDATE career_profiles
+            SET selected_path = ?, updated_at = ?
+            WHERE user_id = ?
+            """,
+            (
+                selected_path.strip(),
+                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                user_id,
+            ),
+        )
     return True
 
 

@@ -21,6 +21,10 @@ from backend import (
     score_from_feedback,
     suggest_questions,
     coach_with_file,
+    generate_career_guidance,
+    generate_skill_gap,
+    generate_career_roadmap,
+    career_chat,
 )
 from database import (
     authenticate_user,
@@ -32,13 +36,16 @@ from database import (
     load_results,
     save_result,
     update_user,
+    get_career_profile,
+    save_career_profile,
+    update_career_selection,
 )
 from frontend import apply_styles, feedback_card, glass_card, metric_card, page_header, section_title, stat_strip
 
 st.set_page_config(page_title="AI-bench", page_icon="AB", layout="wide", initial_sidebar_state="expanded")
 apply_styles()
 
-PAGES = ["Home", "Interview", "Question Suggestions", "Results", "Notes", "AI Coach", "Profile", "About"]
+PAGES = ["Home", "Interview", "Career Guidance", "Question Suggestions", "Results", "Notes", "AI Coach", "Profile", "About"]
 LEVELS = ["Student / Fresher", "Beginner", "Intermediate", "Advanced"]
 DIFFICULTIES = ["Adaptive", "Easy", "Medium", "Hard"]
 
@@ -94,6 +101,7 @@ def logout():
     st.session_state.user_id = None
     st.session_state.page = "Home"
     st.session_state.coach_chat = []
+    st.session_state.career_chat = []
     st.rerun()
 
 
@@ -213,16 +221,20 @@ if st.session_state.page == "Home":
         """,
         unsafe_allow_html=True,
     )
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         glass_card("Start an interview", "Choose a role, subject or custom topic and let the AI take the interviewer seat.", "PRACTISE")
         if st.button("Start now →", key="home_start", type="primary", use_container_width=True):
             reset_interview(); go_to("Interview")
     with c2:
+        glass_card("Career Guidance", "Explore career paths, understand skill gaps and build a practical roadmap.", "DISCOVER")
+        if st.button("Explore careers →", key="home_career", use_container_width=True):
+            go_to("Career Guidance")
+    with c3:
         glass_card("Question suggestions", "Get a structured set of realistic questions before you begin practising.", "PREPARE")
         if st.button("Generate questions →", key="home_suggest", use_container_width=True):
             go_to("Question Suggestions")
-    with c3:
+    with c4:
         glass_card("AI Coach", "Ask for explanations, study plans, interview tips or help improving an answer.", "IMPROVE")
         if st.button("Open coach →", key="home_coach", use_container_width=True):
             go_to("AI Coach")
@@ -254,6 +266,14 @@ elif st.session_state.page == "Interview":
             else:
                 with st.spinner("Building your interview..."):
                     questions = generate_interview(topic.strip(), level, difficulty, count)
+
+                if not questions:
+                    st.error(
+                        "I couldn't generate the interview questions. "
+                        "Please check your AI configuration and try again."
+                    )
+                    st.stop()
+
                 st.session_state.interview_topic = topic.strip()
                 st.session_state.interview_level = level
                 st.session_state.interview_difficulty = difficulty
@@ -261,8 +281,13 @@ elif st.session_state.page == "Interview":
                 st.session_state.question_index = 0
                 st.session_state.interview_transcript = []
                 st.session_state.current_feedback = ""
+                st.session_state.voice_transcript = ""
+                st.session_state.spoken_question_index = None
                 st.session_state.interview_complete = False
                 st.session_state.result_saved = False
+
+                # The timer starts only after question 1 exists.
+                # The next rerun renders the question and answer controls.
                 st.session_state.question_started_at = time.time()
                 st.rerun()
     elif st.session_state.interview_complete:
@@ -292,28 +317,6 @@ elif st.session_state.page == "Interview":
             f'<div class="question-timer"><span>TIME REMAINING</span><strong style="margin-left: 18px;">{minutes:02d}:{seconds:02d}</strong></div>',
             unsafe_allow_html=True,
         )
-
-        # Speak each new question once.
-        if st.session_state.get("spoken_question_index") != idx:
-            components.html(
-                f"""<script>
-                const text = {question!r};
-
-                if ('speechSynthesis' in window) {{
-                    window.speechSynthesis.cancel();
-
-                    const utterance = new SpeechSynthesisUtterance(text);
-                    utterance.rate = 0.92;
-                    utterance.pitch = 1.0;
-                    utterance.lang = 'en-US';
-
-                    window.speechSynthesis.speak(utterance);
-                }}
-                </script>""",
-                height=0,
-            )
-
-            st.session_state.spoken_question_index = idx
 
         # Time-out: record an unanswered question and move on without calling Gemini.
         if remaining <= 0 and not st.session_state.current_feedback:
@@ -353,153 +356,489 @@ elif st.session_state.page == "Interview":
                 st.session_state.result_saved = True
                 st.session_state.question_started_at = None
                 st.rerun()
-            idx = st.session_state.question_index
-            question = st.session_state.interview_questions[idx]
-            total = len(st.session_state.interview_questions)
+        idx = st.session_state.question_index
+        question = st.session_state.interview_questions[idx]
+        total = len(st.session_state.interview_questions)
 
-            st.progress(idx / total if total else 0)
-            
-            st.markdown(
-                f'<div class="interview-meta"><span>QUESTION {idx + 1} OF {total}</span>'
-                f'<span>{safe(st.session_state.interview_topic)}</span>'
-                f'<span>{safe(st.session_state.interview_difficulty)}</span></div>',
-                unsafe_allow_html=True,
+        st.progress(idx / total if total else 0)
+        
+        st.markdown(
+            f'<div class="interview-meta"><span>QUESTION {idx + 1} OF {total}</span>'
+            f'<span>{safe(st.session_state.interview_topic)}</span>'
+            f'<span>{safe(st.session_state.interview_difficulty)}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            f'<div class="question-panel glass reveal">'
+            f'<span class="tag">AI INTERVIEWER</span>'
+            f'<h2>{safe(question)}</h2>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Optional question audio. It is explicitly triggered by the user.
+        listen_col, spacer_col = st.columns([1, 3])
+        with listen_col:
+            listen_question = st.button(
+                "🔊 Listen to question",
+                key=f"listen_question_{idx}",
+                use_container_width=True,
             )
 
-            st.markdown(
-                f'<div class="question-panel glass reveal"><span class="tag">'
-                f'AI INTERVIEWER</span><h2>{safe(question)}</h2></div>',
-                unsafe_allow_html=True,
+        if listen_question:
+            components.html(
+                f"""<script>
+                const text = {question!r};
+                if ('speechSynthesis' in window) {{
+                    window.speechSynthesis.cancel();
+                    const utterance = new SpeechSynthesisUtterance(text);
+                    utterance.rate = 0.92;
+                    utterance.pitch = 1.0;
+                    utterance.lang = 'en-US';
+                    window.speechSynthesis.speak(utterance);
+                }}
+                </script>""",
+                height=0,
             )
 
-            if not st.session_state.current_feedback:
-                st.markdown("### Your answer")
+        if not st.session_state.current_feedback:
+            st.markdown("### Your answer")
+            st.caption("Choose either option. You can type your answer or record it with your microphone.")
 
-                text_col, voice_col = st.columns(2)
+            text_col, voice_col = st.columns(2)
 
-                with text_col:
-                    st.markdown("**Type your answer**")
-                    typed_answer = st.text_area(
-                        "Text answer",
-                        height=150,
-                        placeholder="Type your answer here...",
-                        key=f"answer_{idx}",
-                        label_visibility="collapsed",
-                    )
+            with text_col:
+                st.markdown("**⌨️ Type your answer**")
+                typed_answer = st.text_area(
+                    "Text answer",
+                    height=180,
+                    placeholder="Type your answer here...",
+                    key=f"answer_{idx}",
+                    label_visibility="collapsed",
+                )
 
-                    submit_text = st.button(
-                        "Submit text answer",
-                        type="primary",
-                        use_container_width=True,
-                        key=f"submit_text_{idx}",
-                    )
+                submit_text = st.button(
+                    "Submit typed answer",
+                    type="primary",
+                    use_container_width=True,
+                    key=f"submit_text_{idx}",
+                )
 
-                with voice_col:
-                    st.markdown("**Speak your answer**")
-                    audio_answer = st.audio_input(
-                        "Record your answer",
-                        key=f"voice_{idx}",
-                        # label_visibility="collapsed",
-                    )
+            with voice_col:
+                st.markdown("**🎙️ Record your answer**")
+                st.caption("Click the microphone below to record your answer.")
 
-                    transcribe_voice = st.button(
-                        "Use this recording",
-                        type="primary",
-                        use_container_width=True,
-                        key=f"transcribe_voice_{idx}",
-                    )
+                audio_answer = st.audio_input(
+                    "Record answer",
+                    key=f"voice_{idx}",
+                )
 
-                if transcribe_voice:
-                    if audio_answer is None:
-                        st.warning("Record your answer first.")
+                if audio_answer is not None:
+                    st.audio(audio_answer)
+
+                transcribe_voice = st.button(
+                    "Transcribe recording",
+                    type="secondary",
+                    use_container_width=True,
+                    key=f"transcribe_voice_{idx}",
+                )
+
+            if transcribe_voice:
+                if audio_answer is None:
+                    st.warning("Record your answer first.")
+                else:
+                    with st.spinner("Transcribing your answer..."):
+                        voice_text = transcribe_audio(
+                            audio_answer.getvalue(),
+                            audio_answer.type or "audio/wav",
+                            st.session_state.interview_level,
+                        )
+
+                    if voice_text:
+                        st.session_state.voice_transcript = voice_text
+                        st.rerun()
                     else:
-                        with st.spinner("Transcribing your answer..."):
-                            voice_text = transcribe_audio(
-                                audio_answer.getvalue(),
-                                audio_answer.type or "audio/wav",
+                        st.error("I couldn't transcribe that recording.")
+
+            submit_voice = False
+            voice_answer = ""
+
+            if st.session_state.get("voice_transcript"):
+                st.markdown("**Voice transcript — review or edit before submitting:**")
+
+                voice_answer = st.text_area(
+                    "Voice transcript",
+                    value=st.session_state.voice_transcript,
+                    height=180,
+                    key=f"voice_answer_{idx}",
+                    label_visibility="collapsed",
+                )
+
+                submit_voice = st.button(
+                    "Submit recorded answer",
+                    type="primary",
+                    use_container_width=True,
+                    key=f"submit_voice_{idx}",
+                )
+
+            submit = submit_text or submit_voice
+
+            if submit:
+                answer = (voice_answer if submit_voice else typed_answer).strip()
+
+                if not answer:
+                    st.warning("Write or record an answer before submitting.")
+                else:
+                    with st.spinner("AI is reviewing your answer..."):
+                        feedback = evaluate_answer(
+                            st.session_state.interview_topic,
+                            question,
+                            answer,
+                            st.session_state.interview_level,
+                        )
+
+                    score = score_from_feedback(feedback, answer)
+
+                    st.session_state.interview_transcript.append({
+                        "question": question,
+                        "answer": answer,
+                        "feedback": feedback,
+                        "score": score,
+                    })
+                    st.session_state.current_feedback = feedback
+
+                    if idx + 1 < total:
+                        with st.spinner("Adapting the next question..."):
+                            next_question = generate_next_question(
+                                st.session_state.interview_topic,
                                 st.session_state.interview_level,
+                                st.session_state.interview_difficulty,
+                                st.session_state.interview_transcript,
+                                idx + 2,
                             )
 
-                        if voice_text:
-                            st.session_state.voice_transcript = voice_text
-                            st.rerun()
-                        else:
-                            st.error("I couldn't transcribe that recording.")
-
-                if st.session_state.get("voice_transcript"):
-                    st.markdown("**Voice transcript — review or edit:**")
-
-                    voice_answer = st.text_area(
-                        "Voice transcript",
-                        value=st.session_state.voice_transcript,
-                        height=150,
-                        key=f"voice_answer_{idx}",
-                        label_visibility="collapsed",
-                    )
-
-                    submit_voice = st.button(
-                        "Submit voice answer",
-                        type="primary",
-                        use_container_width=True,
-                        key=f"submit_voice_{idx}",
-                    )
-                else:
-                    voice_answer = ""
-                    submit_voice = False
-
-                submit = submit_text or submit_voice
-
-                if submit:
-                    answer = (voice_answer if submit_voice else typed_answer).strip()
-
-                    if not answer.strip():
-                        st.warning("Write an answer before submitting.")
-                    else:
-                        with st.spinner("AI is reviewing your answer..."):
-                            feedback = evaluate_answer(st.session_state.interview_topic, question, answer.strip(), st.session_state.interview_level)
-                        score = score_from_feedback(feedback, answer)
-                        st.session_state.interview_transcript.append({"question": question, "answer": answer.strip(), "feedback": feedback, "score": score})
-                        st.session_state.current_feedback = feedback
-                        if idx + 1 < total:
-                            with st.spinner("Adapting the next question..."):
-                                next_question = generate_next_question(st.session_state.interview_topic, st.session_state.interview_level, st.session_state.interview_difficulty, st.session_state.interview_transcript, idx + 2)
-                            st.session_state.interview_questions[idx + 1] = next_question
-                            if idx + 1 < total:
-                             with st.spinner("Adapting the next question..."):
-                                                          next_question = generate_next_question(
-                                                              st.session_state.interview_topic,
-                                     st.session_state.interview_level,
-                                     st.session_state.interview_difficulty,
-                                     st.session_state.interview_transcript,
-                                     idx + 2,
-                                 )
                         st.session_state.interview_questions[idx + 1] = next_question
 
-                                 # Reset voice features for the new question
-                        st.session_state.spoken_question_index = None
-                        st.session_state.voice_transcript = ""
-                        st.session_state.question_started_at = time.time()
-                else:
-                        final_score = calculate_session_score(st.session_state.interview_transcript)
-                        save_result(st.session_state.user_id, st.session_state.interview_topic, st.session_state.interview_difficulty, final_score, total, st.session_state.interview_transcript)
+                    st.session_state.spoken_question_index = None
+                    st.session_state.voice_transcript = ""
+                    st.session_state.question_started_at = time.time()
+
+                    if idx + 1 >= total:
+                        final_score = calculate_session_score(
+                            st.session_state.interview_transcript
+                        )
+                        save_result(
+                            st.session_state.user_id,
+                            st.session_state.interview_topic,
+                            st.session_state.interview_difficulty,
+                            final_score,
+                            total,
+                            st.session_state.interview_transcript,
+                        )
                         st.session_state.interview_complete = True
                         st.session_state.result_saved = True
-                        st.rerun()
+                        st.session_state.question_started_at = None
 
-            if st.session_state.current_feedback:
-                st.markdown('<div class="answer-label">AI REVIEW</div>', unsafe_allow_html=True)
-                feedback_card(st.session_state.current_feedback)
-
-            if idx + 1 < total:
-                if st.button("Next question →", type="primary", use_container_width=True):
-                    st.session_state.question_index += 1
-                    st.session_state.current_feedback = ""
-                    st.session_state.question_started_at = time.time()
                     st.rerun()
-            else:
-                st.success("Interview complete. Your result has been saved.")
-                if st.button("See my results →", type="primary", use_container_width=True):
-                    go_to("Results")
+
+        if st.session_state.current_feedback:
+            st.markdown('<div class="answer-label">AI REVIEW</div>', unsafe_allow_html=True)
+            feedback_card(st.session_state.current_feedback)
+
+        if idx + 1 < total:
+            if st.button("Next question →", type="primary", use_container_width=True):
+                st.session_state.question_index += 1
+                st.session_state.current_feedback = ""
+                st.session_state.voice_transcript = ""
+                st.session_state.spoken_question_index = None
+                st.session_state.question_started_at = time.time()
+                st.rerun()
+        else:
+            st.success("Interview complete. Your result has been saved.")
+            if st.button("See my results →", type="primary", use_container_width=True):
+                go_to("Results")
+
+# CAREER GUIDANCE
+elif st.session_state.page == "Career Guidance":
+    page_header(
+        "CAREER GUIDANCE",
+        "Explore where your skills could take you.",
+        "Build a personal career profile, compare relevant paths, identify skill gaps and create a practical roadmap."
+    )
+
+    career_profile = get_career_profile(st.session_state.user_id)
+
+    if not career_profile:
+        st.markdown(
+            """
+            <div class="hero-panel glass reveal">
+                <span class="tag">PERSONALIZED</span>
+                <h2>Start with your profile, not a generic career quiz.</h2>
+                <p>
+                    Tell AI-bench what you are learning, what interests you and what kind of work
+                    you want to explore. It will turn that context into several career paths you can
+                    compare, rather than making the decision for you.
+                </p>
+                <div class="hero-pills">
+                    <span>Career paths</span>
+                    <span>Skill gaps</span>
+                    <span>Learning roadmap</span>
+                    <span>Interview prep</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with st.form("career_assessment_form"):
+        section_title("Career profile", "You can update this whenever your interests or skills change.")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            education = st.text_area(
+                "Education / current level",
+                value=(career_profile or {}).get("education", user.get("level", "")),
+                height=90,
+                placeholder="e.g. MSc Computer Science, final-year BCA, recent graduate...",
+            )
+            interests = st.text_area(
+                "Interests",
+                value=(career_profile or {}).get("interests", ""),
+                height=110,
+                placeholder="e.g. building apps, cybersecurity, AI, design, data, teaching...",
+            )
+            skills = st.text_area(
+                "Current skills",
+                value=(career_profile or {}).get("skills", ""),
+                height=110,
+                placeholder="e.g. JavaScript, React, Python, SQL, communication...",
+            )
+
+        with c2:
+            strengths = st.text_area(
+                "Strengths",
+                value=(career_profile or {}).get("strengths", ""),
+                height=90,
+                placeholder="e.g. problem solving, communication, consistency, creativity...",
+            )
+            work_preferences = st.text_area(
+                "Work preferences",
+                value=(career_profile or {}).get("work_preferences", ""),
+                height=110,
+                placeholder="e.g. remote work, team environment, research, client-facing...",
+            )
+            goals = st.text_area(
+                "Career goals",
+                value=(career_profile or {}).get("goals", ""),
+                height=110,
+                placeholder="e.g. internship, first job, higher studies, startup, freelancing...",
+            )
+
+        generate_career = st.form_submit_button(
+            "Analyze my career options",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if generate_career:
+        if not any([education.strip(), interests.strip(), skills.strip(), goals.strip()]):
+            st.warning("Add at least your education, interests, skills or career goals.")
+        else:
+            with st.spinner("Analyzing your profile and generating career paths..."):
+                recommendations = generate_career_guidance(
+                    education,
+                    interests,
+                    skills,
+                    strengths,
+                    work_preferences,
+                    goals,
+                    user.get("level", "Student / Fresher"),
+                )
+
+            # Preserve any existing roadmap only until the student chooses a new path.
+            save_career_profile(
+                st.session_state.user_id,
+                education,
+                interests,
+                skills,
+                strengths,
+                work_preferences,
+                goals,
+                recommendations,
+                [],
+                [],
+                "",
+            )
+            career_profile = get_career_profile(st.session_state.user_id)
+            st.success("Your career profile has been updated.")
+            st.rerun()
+
+    career_profile = get_career_profile(st.session_state.user_id)
+
+    if career_profile and career_profile.get("recommendations"):
+        recommendations = career_profile["recommendations"]
+
+        section_title(
+            "Career paths to explore",
+            "These are options based on your profile, not a single prescribed answer.",
+        )
+
+        for number, recommendation in enumerate(recommendations, 1):
+            career_name = recommendation.get("career", f"Career path {number}")
+            fit = recommendation.get("fit", "")
+            why = recommendation.get("why", "")
+            skills_list = recommendation.get("skills", [])
+            roles = recommendation.get("roles", [])
+
+            st.markdown(
+                f"""
+                <div class="glass-card reveal">
+                    <span class="tag">PATH {number:02d}</span>
+                    <h4>{safe(career_name)}</h4>
+                    <p><strong>Fit:</strong> {safe(fit)}</p>
+                    <p><strong>Why it connects:</strong> {safe(why)}</p>
+                    <p><strong>Core skills:</strong> {safe(", ".join(skills_list))}</p>
+                    <p><strong>Possible roles:</strong> {safe(", ".join(roles))}</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if st.button(
+                f"Explore {career_name}",
+                key=f"explore_career_{number}",
+                use_container_width=True,
+            ):
+                st.session_state.career_selected_path = career_name
+                with st.spinner("Building your skill gap and roadmap..."):
+                    gap = generate_skill_gap(
+                        career_profile.get("education", ""),
+                        career_profile.get("skills", ""),
+                        career_name,
+                        career_profile.get("goals", ""),
+                        user.get("level", "Student / Fresher"),
+                    )
+                    roadmap = generate_career_roadmap(
+                        career_profile.get("education", ""),
+                        career_profile.get("skills", ""),
+                        career_name,
+                        career_profile.get("goals", ""),
+                        user.get("level", "Student / Fresher"),
+                    )
+
+                save_career_profile(
+                    st.session_state.user_id,
+                    career_profile.get("education", ""),
+                    career_profile.get("interests", ""),
+                    career_profile.get("skills", ""),
+                    career_profile.get("strengths", ""),
+                    career_profile.get("work_preferences", ""),
+                    career_profile.get("goals", ""),
+                    career_profile.get("recommendations", []),
+                    gap,
+                    roadmap,
+                    career_name,
+                )
+                st.rerun()
+
+        career_profile = get_career_profile(st.session_state.user_id)
+        selected_path = career_profile.get("selected_path", "") if career_profile else ""
+
+        if selected_path:
+            section_title("Your selected path", selected_path)
+
+            c1, c2 = st.columns(2)
+
+            with c1:
+                section_title("Skill gap", "Focus on the highest-priority gaps first.")
+                for item in career_profile.get("skill_gap", []):
+                    priority = item.get("priority", "Medium")
+                    st.markdown(
+                        f"""
+                        <div class="glass-card">
+                            <span class="tag">{safe(priority.upper())}</span>
+                            <h4>{safe(item.get("skill", ""))}</h4>
+                            <p><strong>Current:</strong> {safe(item.get("current", ""))}</p>
+                            <p><strong>Target:</strong> {safe(item.get("target", ""))}</p>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+            with c2:
+                section_title("Roadmap", "A staged plan from learning to interview readiness.")
+                for stage in career_profile.get("roadmap", []):
+                    actions = "".join(
+                        f"<li>{safe(action)}</li>"
+                        for action in stage.get("actions", [])
+                    )
+                    st.markdown(
+                        f"""
+                        <div class="glass-card">
+                            <span class="tag">{safe(stage.get("duration", ""))}</span>
+                            <h4>{safe(stage.get("stage", ""))}</h4>
+                            <p><strong>Focus:</strong> {safe(stage.get("focus", ""))}</p>
+                            <ul>{actions}</ul>
+                            <p><strong>Outcome:</strong> {safe(stage.get("outcome", ""))}</p>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+            st.markdown("")
+            if st.button(
+                f"Practice {selected_path} interview →",
+                key="career_start_interview",
+                type="primary",
+                use_container_width=True,
+            ):
+                reset_interview()
+                st.session_state.interview_topic = selected_path
+                go_to("Interview")
+
+            section_title("Career Coach", "Ask follow-up questions using your saved career profile.")
+
+            for i, message in enumerate(st.session_state.get("career_chat", [])):
+                role = "You" if message["role"] == "user" else "AI-bench"
+                st.markdown(
+                    f'<div class="chat-bubble {message["role"]}">'
+                    f'<span>{role}</span><p>{safe(message["content"])}</p></div>',
+                    unsafe_allow_html=True,
+                )
+
+            with st.form("career_chat_form", clear_on_submit=True):
+                career_message = st.text_area(
+                    "Career question",
+                    height=90,
+                    placeholder="e.g. Compare frontend development with cybersecurity for my profile...",
+                    label_visibility="collapsed",
+                )
+                ask_career = st.form_submit_button(
+                    "Ask Career Coach",
+                    type="primary",
+                    use_container_width=True,
+                )
+
+            if ask_career:
+                if not career_message.strip():
+                    st.warning("Ask a career question first.")
+                else:
+                    career_message = career_message.strip()
+                    st.session_state.career_chat.append(
+                        {"role": "user", "content": career_message}
+                    )
+                    with st.spinner("Career Coach is thinking..."):
+                        reply = career_chat(
+                            career_message,
+                            career_profile,
+                            user.get("level", "Student / Fresher"),
+                        )
+                    st.session_state.career_chat.append(
+                        {"role": "assistant", "content": reply}
+                    )
+                    st.rerun()
+
 
 # QUESTION SUGGESTIONS
 elif st.session_state.page == "Question Suggestions":

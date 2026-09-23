@@ -437,3 +437,298 @@ from the audio context.
 
     except Exception:
         return ""
+
+def generate_career_guidance(
+    education,
+    interests,
+    skills,
+    strengths,
+    work_preferences,
+    goals,
+    level="Student / Fresher",
+):
+    """Generate several career paths with reasons, skill gaps and practical next steps."""
+    fallback = [
+        {
+            "career": "Software / Web Development",
+            "fit": "Strong match if you enjoy building applications and solving technical problems.",
+            "why": "This path can build on programming, web technologies and project-based learning.",
+            "skills": ["Programming fundamentals", "Git", "Web development", "Databases", "Problem solving"],
+            "roles": ["Frontend Developer", "Backend Developer", "Full Stack Developer"],
+        },
+        {
+            "career": "Data / Analytics",
+            "fit": "Potential match if you enjoy working with data, patterns and structured problem solving.",
+            "why": "This path combines programming with statistics, analysis and communication.",
+            "skills": ["Python", "SQL", "Statistics", "Data analysis", "Visualization"],
+            "roles": ["Data Analyst", "BI Analyst", "Junior Data Specialist"],
+        },
+        {
+            "career": "Cybersecurity",
+            "fit": "Potential match if you enjoy systems, security concepts and investigating technical problems.",
+            "why": "This path rewards curiosity about networks, operating systems, applications and security controls.",
+            "skills": ["Networking", "Linux", "Web security", "Security fundamentals", "Scripting"],
+            "roles": ["Security Analyst", "SOC Analyst", "Junior Security Engineer"],
+        },
+    ]
+
+    prompt = f"""
+You are a student career guidance assistant.
+
+Candidate profile:
+Education/current level: {education}
+Experience level: {level}
+Interests: {interests}
+Current skills: {skills}
+Strengths: {strengths}
+Work preferences: {work_preferences}
+Goals: {goals}
+
+Create 4 to 6 realistic career paths that could fit this profile.
+
+Return ONLY valid JSON in this exact shape:
+{{
+  "recommendations": [
+    {{
+      "career": "Career path",
+      "fit": "One concise fit statement",
+      "why": "Why this path connects to the profile",
+      "skills": ["Skill 1", "Skill 2", "Skill 3"],
+      "roles": ["Role 1", "Role 2"]
+    }}
+  ]
+}}
+
+Rules:
+- Do not claim that one career is objectively best.
+- Base suggestions on the supplied profile.
+- Keep paths distinct.
+- Prefer concrete career families and entry-level roles.
+- Do not invent qualifications the student has not provided.
+"""
+    raw = ask_ai(
+        prompt,
+        json.dumps({"recommendations": fallback}),
+        instructions="Provide neutral, practical career guidance. Return valid JSON only.",
+    )
+    parsed = _extract_json(raw)
+    recommendations = parsed.get("recommendations", []) if isinstance(parsed, dict) else []
+
+    clean = []
+    for item in recommendations:
+        if not isinstance(item, dict):
+            continue
+        career = str(item.get("career", "")).strip()
+        if not career:
+            continue
+        clean.append({
+            "career": career,
+            "fit": str(item.get("fit", "")).strip(),
+            "why": str(item.get("why", "")).strip(),
+            "skills": [str(x).strip() for x in item.get("skills", []) if str(x).strip()],
+            "roles": [str(x).strip() for x in item.get("roles", []) if str(x).strip()],
+        })
+    return clean or fallback
+
+
+def generate_skill_gap(education, skills, selected_path, goals, level="Student / Fresher"):
+    """Generate a practical skill-gap checklist for a selected career path."""
+    fallback = [
+        {
+            "skill": "Core fundamentals",
+            "current": "Review your existing fundamentals.",
+            "target": "Be able to explain and apply the core concepts independently.",
+            "priority": "High",
+        },
+        {
+            "skill": "Portfolio projects",
+            "current": "Build projects that demonstrate your current skills.",
+            "target": "Have 2-3 focused projects relevant to the target role.",
+            "priority": "High",
+        },
+        {
+            "skill": "Interview preparation",
+            "current": "Practise explaining technical decisions.",
+            "target": "Communicate concepts, trade-offs and project work clearly.",
+            "priority": "Medium",
+        },
+    ]
+
+    prompt = f"""
+Create a skill-gap analysis for a student.
+
+Education: {education}
+Level: {level}
+Current skills: {skills}
+Selected career path: {selected_path}
+Goals: {goals}
+
+Return ONLY valid JSON:
+{{
+  "skill_gap": [
+    {{
+      "skill": "Skill",
+      "current": "What the student likely has or should verify",
+      "target": "What competency is needed",
+      "priority": "High"
+    }}
+  ]
+}}
+
+Rules:
+- Return 5 to 8 concrete items.
+- Use High, Medium or Low priority.
+- Do not assume skills that were not provided.
+- Focus on actionable learning gaps.
+"""
+    raw = ask_ai(
+        prompt,
+        json.dumps({"skill_gap": fallback}),
+        instructions="Generate practical, neutral skill-gap guidance. Return valid JSON only.",
+    )
+    parsed = _extract_json(raw)
+    items = parsed.get("skill_gap", []) if isinstance(parsed, dict) else []
+
+    clean = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        skill = str(item.get("skill", "")).strip()
+        if not skill:
+            continue
+        priority = str(item.get("priority", "Medium")).strip().title()
+        if priority not in {"High", "Medium", "Low"}:
+            priority = "Medium"
+        clean.append({
+            "skill": skill,
+            "current": str(item.get("current", "")).strip(),
+            "target": str(item.get("target", "")).strip(),
+            "priority": priority,
+        })
+    return clean or fallback
+
+
+def generate_career_roadmap(
+    education,
+    skills,
+    selected_path,
+    goals,
+    level="Student / Fresher",
+):
+    """Generate a staged career roadmap."""
+    fallback = [
+        {
+            "stage": "1. Foundations",
+            "duration": "Weeks 1-6",
+            "focus": "Strengthen the fundamentals required for the selected path.",
+            "actions": ["Review core concepts", "Practise small exercises", "Track weak areas"],
+            "outcome": "A clear foundation and learning routine.",
+        },
+        {
+            "stage": "2. Build",
+            "duration": "Weeks 7-14",
+            "focus": "Turn learning into practical work.",
+            "actions": ["Build 2 focused projects", "Use Git", "Document your work"],
+            "outcome": "A small portfolio demonstrating practical ability.",
+        },
+        {
+            "stage": "3. Prepare",
+            "duration": "Weeks 15-20",
+            "focus": "Prepare for internships or entry-level opportunities.",
+            "actions": ["Improve resume", "Practise interviews", "Apply to relevant roles"],
+            "outcome": "Application-ready profile and interview practice.",
+        },
+    ]
+
+    prompt = f"""
+Create a practical roadmap for a student pursuing this career path.
+
+Education: {education}
+Level: {level}
+Current skills: {skills}
+Career path: {selected_path}
+Goals: {goals}
+
+Return ONLY valid JSON:
+{{
+  "roadmap": [
+    {{
+      "stage": "1. Stage name",
+      "duration": "Approximate duration",
+      "focus": "Main objective",
+      "actions": ["Action 1", "Action 2", "Action 3"],
+      "outcome": "What the student should have by the end"
+    }}
+  ]
+}}
+
+Rules:
+- Return 4 to 6 stages.
+- Make the sequence realistic for a student.
+- Include learning, projects, portfolio, applications and interview preparation where relevant.
+- Do not promise employment or a specific outcome.
+"""
+    raw = ask_ai(
+        prompt,
+        json.dumps({"roadmap": fallback}),
+        instructions="Create a practical student career roadmap. Return valid JSON only.",
+    )
+    parsed = _extract_json(raw)
+    stages = parsed.get("roadmap", []) if isinstance(parsed, dict) else []
+
+    clean = []
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        name = str(stage.get("stage", "")).strip()
+        if not name:
+            continue
+        clean.append({
+            "stage": name,
+            "duration": str(stage.get("duration", "")).strip(),
+            "focus": str(stage.get("focus", "")).strip(),
+            "actions": [str(x).strip() for x in stage.get("actions", []) if str(x).strip()],
+            "outcome": str(stage.get("outcome", "")).strip(),
+        })
+    return clean or fallback
+
+
+def career_chat(message, profile, level="Student / Fresher"):
+    """Answer follow-up career questions using the saved career profile."""
+    fallback = (
+        "Use your career profile as a starting point: compare paths by the skills they require, "
+        "the type of work they involve, and how well they connect to your goals. "
+        "Ask me about a specific path, skill or next step."
+    )
+
+    profile_summary = {
+        "education": profile.get("education", ""),
+        "interests": profile.get("interests", ""),
+        "skills": profile.get("skills", ""),
+        "strengths": profile.get("strengths", ""),
+        "work_preferences": profile.get("work_preferences", ""),
+        "goals": profile.get("goals", ""),
+        "selected_path": profile.get("selected_path", ""),
+        "recommendations": profile.get("recommendations", []),
+        "skill_gap": profile.get("skill_gap", []),
+        "roadmap": profile.get("roadmap", []),
+    }
+
+    prompt = f"""
+You are a practical career guidance assistant for a {level} student.
+
+Saved career profile:
+{json.dumps(profile_summary, ensure_ascii=False)}
+
+Student question:
+{message}
+
+Give useful, neutral guidance grounded in the profile.
+- Do not make the student's career decision for them.
+- Explain trade-offs when comparing paths.
+- Give concrete next steps.
+- If the profile lacks information needed for a precise answer, say what information would help.
+"""
+    return ask_ai(prompt, fallback)
+
+
